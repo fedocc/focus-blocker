@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+verification*.json
+state.json
+lease.json
+config.json
+.env*
