@@ -28,6 +28,7 @@ LOCK_PATH = Path("/tmp/focus_open.lock")
 TEMP_PREFIX = "# TEMP_FOCUS_UNLOCK "
 DEFAULT_COOLDOWN_SECONDS = 2 * 60 * 60
 YOUTUBE_BUFFER_SECONDS = 2 * 60
+YOUTUBE_METADATA_TIMEOUT_SECONDS = 12
 YOUTUBE_MAX_ACCESS_SECONDS = 90 * 60
 MANUAL_MAX_SECONDS = 30 * 60
 DEFAULT_BROWSER_APP = "Arc"
@@ -158,6 +159,11 @@ def service_state(state: dict[str, Any], service_key: str) -> dict[str, Any]:
 
 def normalize_url_input(raw_url: str) -> str:
     value = raw_url.strip()
+    markdown = re.fullmatch(r"\[[^\]\n]*\]\((https?://[^\s]+)\)", value)
+    if markdown:
+        value = markdown.group(1)
+    elif value.startswith("<") and value.endswith(">"):
+        value = value[1:-1].strip()
     if not value:
         return value
     if "://" not in value:
@@ -401,27 +407,30 @@ def get_reason() -> str:
 
 
 def get_youtube_duration_seconds(url: str) -> int | None:
-    if shutil.which("yt-dlp") is None:
-        print("yt-dlp не найден. Установить можно командой: brew install yt-dlp", file=sys.stderr)
+    executable = shutil.which("yt-dlp")
+    validation = validate_url("youtube", url)
+    if executable is None or not validation.allowed:
         return None
     try:
         result = subprocess.run(
-            ["yt-dlp", "--no-warnings", "--print", "duration", url],
+            [executable, "--ignore-config", "--no-warnings", "--no-playlist",
+             "--skip-download", "--ignore-no-formats-error",
+             "--socket-timeout", "3", "--retries", "0", "--extractor-retries", "0",
+             "--print", "duration", "--", validation.normalized_url],
             text=True,
             capture_output=True,
             check=False,
-            timeout=45,
+            timeout=YOUTUBE_METADATA_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        print(f"Не удалось запустить yt-dlp: {exc}", file=sys.stderr)
+    except (OSError, subprocess.TimeoutExpired):
+        # Metadata is optional. Keep the established quiet 12-minute fallback.
         return None
     if result.returncode != 0:
-        print(f"yt-dlp не смог получить длительность: {result.stderr.strip()}", file=sys.stderr)
         return None
-    match = re.search(r"\d+(?:\.\d+)?", result.stdout.strip())
-    if not match:
+    value = result.stdout.strip()
+    if not re.fullmatch(r"\d+(?:\.\d+)?", value):
         return None
-    return max(1, int(float(match.group(0))))
+    return max(1, int(float(value)))
 
 
 def get_youtube_duration_with_temporary_hosts_unlock(url: str) -> int | None:
