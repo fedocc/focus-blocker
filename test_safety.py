@@ -24,6 +24,10 @@ HOSTS = '''127.0.0.1 unrelated.test
 127.0.0.1 web.telegram.org
 ::1 web.telegram.org
 # === FOCUS_BLOCK:TELEGRAM END ===
+# === FOCUS_BLOCK:VKVIDEO START ===
+127.0.0.1 vkvideo.ru
+::1 vkvideo.ru
+# === FOCUS_BLOCK:VKVIDEO END ===
 '''
 
 
@@ -106,10 +110,34 @@ class LeaseTests(unittest.TestCase):
         self.assertEqual(events, ['input', 'locked'])
 
     def test_invalid_arguments_do_not_change_hosts(self):
-        for service, duration in [('other', 60), ('youtube', 0), ('youtube', -1), ('youtube', 21601)]:
+        for service, duration in [('other', 60), ('vkvideo', 60), ('youtube', 0), ('youtube', -1), ('youtube', 21601)]:
             with self.assertRaises(ValueError):
                 helper.lease(service, duration)
         self.assertEqual(helper.HOSTS.read_text(), HOSTS)
+
+    def test_permanent_block_is_repaired_and_cannot_be_leased(self):
+        tampered = helper.transform(HOSTS, 'vkvideo', True)
+        helper.HOSTS.write_text(tampered)
+        helper.enforce_permanent_blocks()
+        self.assertEqual(helper.HOSTS.read_text(), HOSTS)
+        self.stop.assert_called_once()
+        with self.assertRaises(ValueError):
+            helper.lease('vkvideo', 60)
+
+    def test_restore_never_unblocks_permanent_block(self):
+        helper.lease('youtube', 60)
+        helper.restore()
+        self.assertEqual(helper.HOSTS.read_text(), HOSTS)
+        self.assertNotIn(helper.PREFIX + '127.0.0.1 vkvideo.ru', helper.HOSTS.read_text())
+
+    def test_missing_permanent_block_is_recreated(self):
+        without_block = HOSTS.split('# === FOCUS_BLOCK:VKVIDEO START ===')[0]
+        helper.HOSTS.write_text(without_block)
+        helper.enforce_permanent_blocks()
+        restored = helper.HOSTS.read_text()
+        self.assertIn('# === FOCUS_BLOCK:VKVIDEO START ===', restored)
+        for domain in helper.PERMANENT_DOMAINS['vkvideo']:
+            self.assertIn(f'127.0.0.1 {domain}\n', restored)
 
     def test_deadline_saved_before_hosts_open(self):
         def write(text):

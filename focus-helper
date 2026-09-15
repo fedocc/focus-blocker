@@ -15,7 +15,15 @@ HOSTS = Path('/etc/hosts')
 STATE = BASE / 'lease.json'
 HEARTBEAT = BASE / 'heartbeat'
 PREFIX = '# TEMP_FOCUS_UNLOCK '
-SERVICES = ('youtube', 'instagram', 'telegram')
+TEMPORARY_SERVICES = ('youtube', 'instagram', 'telegram')
+PERMANENT_BLOCKS = ('vkvideo',)
+PERMANENT_DOMAINS = {
+    'vkvideo': (
+        'vkvideo.ru', 'www.vkvideo.ru', 'm.vkvideo.ru',
+        'api.vkvideo.ru', 'live.vkvideo.ru', 'api.live.vkvideo.ru',
+        'video.vk.com',
+    ),
+}
 
 
 def transform(text, service, unlock):
@@ -34,6 +42,24 @@ def transform(text, service, unlock):
         elif not unlock and stripped.startswith(PREFIX):
             lines[i] = indent + stripped[len(PREFIX):]
     return ''.join(lines)
+
+
+def enforce_permanent_text(text):
+    enforced = text
+    for service in PERMANENT_BLOCKS:
+        start = '# === FOCUS_BLOCK:' + service.upper() + ' START ==='
+        end = '# === FOCUS_BLOCK:' + service.upper() + ' END ==='
+        if start not in enforced and end not in enforced:
+            if enforced and not enforced.endswith('\n'):
+                enforced += '\n'
+            enforced += start + '\n'
+            for ip in ('127.0.0.1', '::1'):
+                for domain in PERMANENT_DOMAINS[service]:
+                    enforced += ip + ' ' + domain + '\n'
+            enforced += end + '\n'
+        else:
+            enforced = transform(enforced, service, False)
+    return enforced
 
 
 @contextlib.contextmanager
@@ -74,8 +100,9 @@ def restore():
     lease = read_lease()
     text = HOSTS.read_text()
     restored = text
-    for service in SERVICES:
+    for service in TEMPORARY_SERVICES:
         restored = transform(restored, service, False)
+    restored = enforce_permanent_text(restored)
     stop_error = None
     if lease or restored != text:
         # Restore hosts even if process termination itself encounters an error.
@@ -93,7 +120,7 @@ def restore():
 
 
 def lease(service, seconds):
-    if service not in SERVICES or not 1 <= seconds <= 6 * 60 * 60:
+    if service not in TEMPORARY_SERVICES or not 1 <= seconds <= 6 * 60 * 60:
         raise ValueError('Invalid lease')
     if not HEARTBEAT.exists() or time.time() - HEARTBEAT.stat().st_mtime > 3:
         raise RuntimeError('Focus timer unavailable; access stays blocked')
@@ -117,6 +144,15 @@ def expire():
         restore()
 
 
+def enforce_permanent_blocks():
+    text = HOSTS.read_text()
+    enforced = enforce_permanent_text(text)
+    if enforced != text:
+        stop_browser()
+        write_hosts(enforced)
+        flush()
+
+
 def main():
     if os.geteuid() != 0:
         raise RuntimeError('Requires installed sudo permission')
@@ -127,12 +163,13 @@ def main():
         while True:
             with locked():
                 expire()
+                enforce_permanent_blocks()
                 HEARTBEAT.touch()
             time.sleep(0.5)
     # Never hold the global lock while waiting for caller input: the daemon
     # must remain free to expire a different lease even if stdin stays open.
     duration = None
-    if len(args) == 2 and args[0] == 'lease' and args[1] in SERVICES:
+    if len(args) == 2 and args[0] == 'lease' and args[1] in TEMPORARY_SERVICES:
         duration = int(sys.stdin.read(16))
     with locked():
         if args == ['check']:
@@ -140,7 +177,7 @@ def main():
                 raise RuntimeError('Focus timer is not running')
         elif args == ['restore']:
             restore()
-        elif len(args) == 2 and args[0] == 'lease' and args[1] in SERVICES:
+        elif len(args) == 2 and args[0] == 'lease' and args[1] in TEMPORARY_SERVICES:
             lease(args[1], duration)
         else:
             raise ValueError('Unsupported command')

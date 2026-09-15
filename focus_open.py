@@ -88,6 +88,26 @@ SERVICES: dict[str, ServiceConfig] = {
     ),
 }
 
+PERMANENT_BLOCKS: dict[str, ServiceConfig] = {
+    "vkvideo": ServiceConfig(
+        key="vkvideo",
+        display_name="VK Video",
+        block_name="VKVIDEO",
+        input_prompt="",
+        allowed_domains=(
+            "vkvideo.ru",
+            "www.vkvideo.ru",
+            "m.vkvideo.ru",
+            "api.vkvideo.ru",
+            "live.vkvideo.ru",
+            "api.live.vkvideo.ru",
+            "video.vk.com",
+        ),
+        cooldown_seconds=0,
+    ),
+}
+ALL_BLOCKS = {**SERVICES, **PERMANENT_BLOCKS}
+
 
 def now_local() -> dt.datetime:
     return dt.datetime.now().astimezone()
@@ -507,7 +527,7 @@ def transform_hosts_block(hosts_text: str, block_name: str, unlock: bool) -> str
 
 def restore_all_hosts_text(hosts_text: str) -> str:
     output = hosts_text
-    for config in SERVICES.values():
+    for config in ALL_BLOCKS.values():
         try:
             output = transform_hosts_block(output, config.block_name, unlock=False)
         except HostsBlockError:
@@ -861,7 +881,7 @@ def run_service(
 
 
 def service_block_status(service_key: str) -> str:
-    config = SERVICES[service_key]
+    config = ALL_BLOCKS[service_key]
     try:
         text = read_hosts()
         lines = text.splitlines()
@@ -897,6 +917,8 @@ def print_status() -> int:
         else:
             availability = "available now"
         print(f"{config.display_name}: {availability}; hosts: {service_block_status(key)}")
+    for key, config in PERMANENT_BLOCKS.items():
+        print(f"{config.display_name}: permanently blocked; hosts: {service_block_status(key)}")
     return 0
 
 
@@ -932,6 +954,8 @@ def print_doctor() -> int:
         print("warning: /etc/hosts immutable flag is set; run: sudo chflags nouchg /etc/hosts")
     for key, config in SERVICES.items():
         print(f"{config.display_name}: hosts {service_block_status(key)}")
+    for key, config in PERMANENT_BLOCKS.items():
+        print(f"{config.display_name}: permanent hosts {service_block_status(key)}")
 
     print(f"{DEFAULT_BROWSER_APP}.app: {'found' if app_exists(DEFAULT_BROWSER_APP) else 'not found'}")
     print(f"{DEFAULT_BROWSER_APP} running: {app_is_running(DEFAULT_BROWSER_APP)}")

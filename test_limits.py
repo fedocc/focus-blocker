@@ -150,6 +150,33 @@ class HostsTests(unittest.TestCase):
         self.assertTrue(all(domain.endswith('.web.telegram.org') or domain=='web.telegram.org' for domain in install.TELEGRAM_DOMAINS))
         self.assertEqual(install.telegram_hosts(changed),changed)
 
+    def test_vkvideo_permanent_block_is_scoped_and_idempotent(self):
+        original='127.0.0.1 localhost\n127.0.0.1 unrelated.example\n'
+        changed=install.permanent_hosts(original)
+        self.assertEqual(install.permanent_hosts(changed),changed)
+        for domain in install.VKVIDEO_DOMAINS:
+            self.assertIn(f'127.0.0.1 {domain}\n',changed)
+            self.assertIn(f'::1 {domain}\n',changed)
+        self.assertNotIn('127.0.0.1 vk.com\n',changed)
+        self.assertNotIn('vk.ru',changed)
+        self.assertNotIn('vkcdn',changed)
+        self.assertTrue(changed.startswith(original))
+
+    def test_vkvideo_has_no_cli_or_generic_unlock_route(self):
+        parser=f.build_parser()
+        self.assertNotIn('vkvideo',parser._subparsers._group_actions[0].choices)
+        open_parser=parser._subparsers._group_actions[0].choices['open']
+        service_action=next(action for action in open_parser._actions if action.dest=='service')
+        self.assertNotIn('vkvideo',service_action.choices)
+        self.assertNotIn('vkvideo',f.SERVICES)
+        self.assertIn('vkvideo',f.PERMANENT_BLOCKS)
+
+    def test_restore_text_repairs_permanent_block(self):
+        hosts=install.permanent_hosts('127.0.0.1 localhost\n')
+        unlocked=f.transform_hosts_block(hosts,'VKVIDEO',True)
+        self.assertIn(f.TEMP_PREFIX,unlocked)
+        self.assertEqual(f.restore_all_hosts_text(unlocked),hosts)
+
 
 if __name__=='__main__':
     unittest.main()

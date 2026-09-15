@@ -21,16 +21,39 @@ TELEGRAM_DOMAINS = ['web.telegram.org'] + [
     for name in ('pluto', 'venus', 'aurora', 'vesta', 'flora', 'kws1', 'kws2', 'kws3', 'kws4', 'kws5')
     for suffix in ('', '-1')
 ]
+VKVIDEO_DOMAINS = [
+    'vkvideo.ru',
+    'www.vkvideo.ru',
+    'm.vkvideo.ru',
+    'api.vkvideo.ru',
+    'live.vkvideo.ru',
+    'api.live.vkvideo.ru',
+    'video.vk.com',
+]
 
-def telegram_hosts(text):
-    start = '# === FOCUS_BLOCK:TELEGRAM START ==='
-    end = '# === FOCUS_BLOCK:TELEGRAM END ==='
-    block = start + '\n' + ''.join(f'{ip} {domain}\n' for ip in ('127.0.0.1', '::1') for domain in TELEGRAM_DOMAINS) + end + '\n'
+
+def hosts_block(text, block_name, domains):
+    start = f'# === FOCUS_BLOCK:{block_name} START ==='
+    end = f'# === FOCUS_BLOCK:{block_name} END ==='
+    block = start + '\n' + ''.join(
+        f'{ip} {domain}\n'
+        for ip in ('127.0.0.1', '::1')
+        for domain in domains
+    ) + end + '\n'
     if start in text or end in text:
+        if start not in text or end not in text:
+            raise RuntimeError(f'Incomplete hosts block: {block_name}')
         a = text.index(start)
         b = text.index(end, a) + len(end)
         return text[:a] + block.rstrip('\n') + text[b:]
     return text + ('\n' if text.endswith('\n') else '\n\n') + block
+
+def telegram_hosts(text):
+    return hosts_block(text, 'TELEGRAM', TELEGRAM_DOMAINS)
+
+
+def permanent_hosts(text):
+    return hosts_block(text, 'VKVIDEO', VKVIDEO_DOMAINS)
 
 
 def main():
@@ -52,7 +75,7 @@ def main():
     backup = Path('/private/etc/hosts.backup.focus_open.install-' + stamp)
     shutil.copy2('/private/etc/hosts', backup)
     hosts = Path('/private/etc/hosts')
-    updated_hosts = telegram_hosts(hosts.read_text())
+    updated_hosts = permanent_hosts(telegram_hosts(hosts.read_text()))
     hosts_tmp = Path('/private/etc/hosts.focus-open.install.tmp')
     hosts_tmp.write_text(updated_hosts)
     hosts_tmp.chmod(0o644)
