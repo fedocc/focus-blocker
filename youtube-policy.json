@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "playlists": [
+    {
+      "id": "PLEwK9wdS5g0q1A2aQI83jeaRPwhBZhprY",
+      "title": "Глубинное обучение 1 2023/2024",
+      "alias": "dl",
+      "channel": "ФКН ВШЭ — дистанционные занятия",
+      "videos": [
+        {
+          "id": "DXZK3rpDp4U",
+          "title": "Deep Learning 1, Lecture 1 – Backpropagation, Fully Connected Neural Networks",
+          "duration_seconds": 4603
+        },
+        {
+          "id": "SWD-Zk4P1j0",
+          "title": "Глубинное обучение 1, лекция 2 – кросс-энтропийная функция потерь, Dropout, Batch Normalization",
+          "duration_seconds": 4664
+        },
+        {
+          "id": "_RbndAAVMA4",
+          "title": "Deep Learning 1, Lecture 3 – Neural Network Optimization",
+          "duration_seconds": 5052
+        },
+        {
+          "id": "C__S5v9iObQ",
+          "title": "Deep Learning 1, Lecture 4 – Convolution Operation",
+          "duration_seconds": 4777
+        },
+        {
+          "id": "NYKiAqT8xXY",
+          "title": "Deep Learning 1, Lecture 5 – Convolutional Architectures",
+          "duration_seconds": 4515
+        },
+        {
+          "id": "GGFSKLPKeL4",
+          "title": "Deep Learning 1, Lecture 6: Computer Vision Tasks",
+          "duration_seconds": 4952
+        },
+        {
+          "id": "pLFnqfvM7No",
+          "title": "Deep Learning 1, Lecture 7 – Tokenization, Embeddings, TextCNN",
+          "duration_seconds": 5080
+        },
+        {
+          "id": "sXWwrz4v2OQ",
+          "title": "Deep Learning 1, Lecture 8 – Recurrent Neural Networks",
+          "duration_seconds": 5227
+        },
+        {
+          "id": "x5bIzeIPdvI",
+          "title": "Глубинное обучение 1, лекция 9 – архитектура трансформера",
+          "duration_seconds": 4878
+        },
+        {
+          "id": "XEZBwLRPDBY",
+          "title": "Deep Learning 1, Lecture 10 – Self-supervised Learning, BERT, SimCLR",
+          "duration_seconds": 4499
+        },
+        {
+          "id": "OH6IVeoaAmQ",
+          "title": "Глубинное обучение 1, лекция 11 – трансформеры для компьютерного зрения",
+          "duration_seconds": 3428
+        },
+        {
+          "id": "rW6hQloci7M",
+          "title": "Deep Learning 1, Lecture 12 – Optimizations for Neural Network Inference",
+          "duration_seconds": 3977
+        },
+        {
+          "id": "EbuW6AFAfho",
+          "title": "Deep Learning 1, Lecture 13 – Adversarial Attacks, Generative Adversarial Networks (GANs)",
+          "duration_seconds": 4436
+        },
+        {
+          "id": "KiwaAQBYbCI",
+          "title": "Deep Learning 1, Lecture 14 – Variational Autoencoder (VAE)",
+          "duration_seconds": 5111
+        },
+        {
+          "id": "H0fczcpFbpg",
+          "title": "Глубинное обучение 1, лекция 15 – диффузионные модели",
+          "duration_seconds": 5671
+        }
+      ]
+    },
+    {
+      "id": "PLYftJUd2A-Uw",
+      "title": "Ввведение в глубинное обучение. Семинары",
+      "alias": "dl-seminars",
+      "channel": "Мопторий ФКН",
+      "owner_id": "UCGY5mIxE-8T8BZFQVH3386Q",
+      "auto_refresh": true,
+      "refresh_interval_seconds": 60,
+      "videos": [
+        {
+          "id": "SMPIJhzA_XI",
+          "title": "Глубинное обучение 1. Семинар 1",
+          "duration_seconds": 4410
+        },
+        {
+          "id": "x89DPQ6WOMI",
+          "title": "Глубинное обучение 1. Семинар 2",
+          "duration_seconds": 4766
+        },
+        {
+          "id": "WlVaLDgGRyU",
+          "title": "Глубинное обучение 1. Семинар 3",
+          "duration_seconds": 2375
+        },
+        {
+          "id": "xSyvExwEo1w",
+          "title": "Глубинное обучение 1. Семинар 4",
+          "duration_seconds": 4145
+        }
+      ]
+    },
+    {
+      "id": "UUGY5mIxE-8T8BZFQVH3386Q",
+      "title": "Все видео канала Мопторий ФКН",
+      "alias": "seminars-uploads",
+      "channel": "Мопторий ФКН",
+      "owner_id": "UCGY5mIxE-8T8BZFQVH3386Q",
+      "auto_refresh": true,
+      "refresh_interval_seconds": 60,
+      "videos": [
+        {
+          "id": "CibAgUC67x0",
+          "title": "Глубинное обучение 1. Семинар 6",
+          "duration_seconds": 4105
+        },
+        {
+          "id": "xSyvExwEo1w",
+          "title": "Глубинное обучение 1. Семинар 4",
+          "duration_seconds": 4145
+        },
+        {
+          "id": "y_tWoiuFo9E",
+          "title": "Глубинное обучение 1. Лекция 2",
+          "duration_seconds": 5369
+        },
+        {
+          "id": "YcKbFp0RsSA",
+          "title": "Глубинное обучение 1. Лекция 6",
+          "duration_seconds": 4879
+        },
+        {
+          "id": "fMkgprUBehI",
+          "title": "Глубинное обучение 1. Лекция 5",
+          "duration_seconds": 4824
+        },
+        {
+          "id": "x89DPQ6WOMI",
+          "title": "Глубинное обучение 1. Семинар 2",
+          "duration_seconds": 4766
+        },
+        {
+          "id": "4Rq_k8gMK2E",
+          "title": "Машинное обучение 2. Лекция 6",
+          "duration_seconds": 4587
+        },
+        {
+          "id": "7mF6OYW2WbU",
+          "title": "Глубинное обучение 1. Лекция 1",
+          "duration_seconds": 5282
+        },
+        {
+          "id": "O4tOXINPjLU",
+          "title": "Глубинное обучение 1. Лекция 4",
+          "duration_seconds": 4686
+        },
+        {
+          "id": "1Hga8W_dyD8",
+          "title": "Машинное обучение 2. Лекция 5",
+          "duration_seconds": 4773
+        },
+        {
+          "id": "4kVm0m3Ubvw",
+          "title": "Машинное обучение 2. Лекция 3",
+          "duration_seconds": 4655
+        },
+        {
+          "id": "9NrB8CQ_CVo",
+          "title": "Машинное обучени 2. Лекция 4",
+          "duration_seconds": 4372
+        },
+        {
+          "id": "G_hxshkpDkc",
+          "title": "Машинное обучение 2. Лекция 2",
+          "duration_seconds": 4169
+        },
+        {
+          "id": "P8VDK4FjmBo",
+          "title": "Машинное обучение 2. Лекция 1",
+          "duration_seconds": 3463
+        },
+        {
+          "id": "SMPIJhzA_XI",
+          "title": "Глубинное обучение 1. Семинар 1",
+          "duration_seconds": 4410
+        },
+        {
+          "id": "WlVaLDgGRyU",
+          "title": "Глубинное обучение 1. Семинар 3",
+          "duration_seconds": 2375
+        }
+      ]
+    }
+  ],
+  "channels": [
+    {
+      "id": "UCGY5mIxE-8T8BZFQVH3386Q",
+      "title": "Мопторий ФКН",
+      "handle": "Moptori-FCS",
+      "alias": "seminars",
+      "uploads_playlist_id": "UUGY5mIxE-8T8BZFQVH3386Q"
+    }
+  ]
+}

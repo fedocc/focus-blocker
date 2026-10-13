@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 
 HOSTS_PATH = Path("/etc/hosts")
@@ -27,21 +28,28 @@ STATE_PATH = STATE_DIR / "state.json"
 LOCK_PATH = Path("/tmp/focus_open.lock")
 TEMP_PREFIX = "# TEMP_FOCUS_UNLOCK "
 DEFAULT_COOLDOWN_SECONDS = 2 * 60 * 60
+YOUTUBE_COOLDOWN_SECONDS = 6 * 60 * 60
 YOUTUBE_BUFFER_SECONDS = 2 * 60
 YOUTUBE_METADATA_TIMEOUT_SECONDS = 12
 YOUTUBE_MAX_ACCESS_SECONDS = 90 * 60
 MANUAL_MAX_SECONDS = 30 * 60
 DEFAULT_BROWSER_APP = "Arc"
-BROWSER_GUARD_SERVICES = {"youtube", "instagram"}
+BROWSER_GUARD_SERVICES = {"youtube", "instagram", "x"}
 MIN_REASON_CHARS = 12
 MIN_REASON_WORDS = 5
 BROWSER_MONITOR_GRACE_SECONDS = 12
 POST_OPEN_VERIFY_SECONDS = 15
 DEFAULT_URL_MONITOR_ENABLED = False
 TELEGRAM_URL = "https://web.telegram.org/"
-TELEGRAM_DEFAULT_MINUTES = 15
-CONTENT_LIMITS = {"youtube": 2, "instagram": 1}
+TELEGRAM_DEFAULT_MINUTES = 7
+INSTAGRAM_URL = "https://www.instagram.com/"
+INSTAGRAM_ACCESS_SECONDS = 2 * 60
+X_URL = "https://x.com/"
+DAILY_TIMEZONE = ZoneInfo("Europe/Moscow")
+SHORT_SOCIAL_HOMES = {"instagram": INSTAGRAM_URL, "x": X_URL}
+CONTENT_LIMITS = {"youtube": 2}
 HELPER_PATH = Path("/Library/PrivilegedHelperTools/focus-open/focus-helper")
+YOUTUBE_POLICY_PATH = HELPER_PATH.parent / "youtube-policy.json"
 
 
 @dataclass(frozen=True)
@@ -78,14 +86,17 @@ SERVICES: dict[str, ServiceConfig] = {
         block_name="YOUTUBE",
         input_prompt="Вставьте ссылку на YouTube-видео",
         allowed_domains=("youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"),
+        cooldown_seconds=YOUTUBE_COOLDOWN_SECONDS,
     ),
     "instagram": ServiceConfig(
         key="instagram",
         display_name="Instagram",
         block_name="INSTAGRAM",
-        input_prompt="Вставьте ссылку на Instagram post/reel",
+        input_prompt="",
         allowed_domains=("instagram.com", "www.instagram.com"),
+        cooldown_seconds=0,
     ),
+    "x": ServiceConfig("x", "X", "X", "", ("x.com", "www.x.com", "twitter.com", "www.twitter.com"), cooldown_seconds=0),
 }
 
 PERMANENT_BLOCKS: dict[str, ServiceConfig] = {
@@ -173,7 +184,7 @@ def cooldown_remaining(last_opened_at: dt.datetime | None, now: dt.datetime, coo
 def service_state(state: dict[str, Any], service_key: str) -> dict[str, Any]:
     services = state.setdefault("services", {})
     service = services.setdefault(service_key, {})
-    service.setdefault("cooldown_seconds", DEFAULT_COOLDOWN_SECONDS)
+    service.setdefault("cooldown_seconds", SERVICES[service_key].cooldown_seconds)
     return service
 
 
@@ -211,18 +222,10 @@ def validate_url(service_key: str, raw_url: str) -> UrlValidation:
             return UrlValidation(False, url, "Shorts запрещены по умолчанию.")
         return UrlValidation(False, url, "Разрешены только youtube.com/watch?v=... и youtu.be/...")
 
-    if service_key == "instagram":
-        if host not in SERVICES["instagram"].allowed_domains:
-            return UrlValidation(False, url, "Это не разрешенный домен Instagram.")
-        parts = [part for part in path.split("/") if part]
-        content_type = normalize_instagram_content_type(parts[0]) if parts else None
-        if len(parts) >= 2 and content_type == "p":
-            return UrlValidation(True, url, access_seconds=2 * 60)
-        if len(parts) >= 2 and content_type == "reel":
-            return UrlValidation(True, url, access_seconds=3 * 60)
-        if parts and parts[0] == "stories":
-            return UrlValidation(False, url, "Stories запрещены по умолчанию.")
-        return UrlValidation(False, url, "Разрешены только instagram.com/p/..., instagram.com/reel/... и instagram.com/reels/...")
+    if service_key in SHORT_SOCIAL_HOMES:
+        if host not in SERVICES[service_key].allowed_domains:
+            return UrlValidation(False, url, "Это не разрешенный домен " + SERVICES[service_key].display_name + ".")
+        return UrlValidation(True, url, access_seconds=INSTAGRAM_ACCESS_SECONDS)
 
     return UrlValidation(False, url, f"Неизвестный сервис: {service_key}")
 
@@ -274,15 +277,20 @@ def content_use_count(state: dict[str, Any], service: str, url: str) -> int:
 
 
 def ensure_content_limit(state: dict[str, Any], service: str, url: str) -> None:
-    limit = CONTENT_LIMITS[service]
+    limit = CONTENT_LIMITS.get(service)
+    if limit is None:
+        return
     if content_use_count(state, service, url) >= limit:
         raise FocusOpenError(f"Эта ссылка уже использована {limit} раз. Повторный доступ закрыт.")
 
 
+def service_used_today(state: dict[str, Any], key: str, now: dt.datetime) -> bool:
+    last = parse_iso_datetime(state.get("services", {}).get(key, {}).get("last_opened_at"))
+    return last is not None and now.astimezone(DAILY_TIMEZONE).date() <= last.astimezone(DAILY_TIMEZONE).date()
+
+
 def telegram_used_today(state: dict[str, Any], now: dt.datetime) -> bool:
-    service = state.get("services", {}).get("telegram", {})
-    last = parse_iso_datetime(service.get("last_opened_at"))
-    return last is not None and last.astimezone(now.tzinfo).date() == now.date()
+    return service_used_today(state, "telegram", now)
 
 
 def default_browser_app() -> str:
@@ -301,8 +309,8 @@ def run_telegram(set_minutes: int | None = None) -> int:
         state = load_state()
         service = service_state(state, "telegram")
         if set_minutes is not None:
-            if not 1 <= set_minutes <= 90:
-                raise FocusOpenError("Продолжительность Telegram должна быть от 1 до 90 минут.")
+            if set_minutes != TELEGRAM_DEFAULT_MINUTES:
+                raise FocusOpenError("Защищённый лимит Telegram — 7 минут в день.")
             service["duration_minutes"] = set_minutes
             save_state(state)
             print(f"Telegram: {set_minutes} мин. со следующей сессии.")
@@ -316,13 +324,7 @@ def run_telegram(set_minutes: int | None = None) -> int:
         if telegram_used_today(state, now):
             print("Telegram access already used today.")
             return 1
-        # The existing privileged guard terminates Arc to end cached connections.
-        # Refuse before granting access if the default browser has changed.
-        if default_browser_app() != DEFAULT_BROWSER_APP:
-            raise FocusOpenError("Для надёжной автоблокировки Telegram браузером по умолчанию должен быть Arc.")
-        minutes = int(service.get("duration_minutes", TELEGRAM_DEFAULT_MINUTES))
-        if not 1 <= minutes <= 90:
-            raise FocusOpenError("Некорректная продолжительность Telegram. Используй telegram --set-minutes 15.")
+        minutes = TELEGRAM_DEFAULT_MINUTES
         helper_command("check")
         # Reserve the day durably before granting access. A killed terminal cannot
         # leave an unrecorded successful session or grant a second window.
@@ -353,8 +355,8 @@ def browser_url_allowed(service_key: str, expected_url: str, current_url: str) -
         return False
     if service_key == "youtube":
         return extract_youtube_video_id(expected_url) == extract_youtube_video_id(current_url)
-    if service_key == "instagram":
-        return extract_instagram_content_key(expected_url) == extract_instagram_content_key(current_url)
+    if service_key in SHORT_SOCIAL_HOMES:
+        return True
     return normalize_url_input(expected_url).rstrip("/") == validation.normalized_url.rstrip("/")
 
 
@@ -454,11 +456,7 @@ def get_youtube_duration_seconds(url: str) -> int | None:
 
 
 def get_youtube_duration_with_temporary_hosts_unlock(url: str) -> int | None:
-    try:
-        helper_command("lease", "youtube", "60")
-        return get_youtube_duration_seconds(url)
-    finally:
-        restore_all_hosts_blocks()
+    raise FocusOpenError("Метаданные YouTube доступны только внутри сессии выбранного видео.")
 
 
 def ask_manual_duration_seconds(max_seconds: int = MANUAL_MAX_SECONDS) -> int:
@@ -474,8 +472,8 @@ def ask_manual_duration_seconds(max_seconds: int = MANUAL_MAX_SECONDS) -> int:
 
 
 def compute_access_seconds(service_key: str, url: str, validation: UrlValidation, youtube_duration: int | None = None) -> int:
-    if service_key == "instagram":
-        return validation.access_seconds or 2 * 60
+    if service_key in SHORT_SOCIAL_HOMES:
+        return INSTAGRAM_ACCESS_SECONDS
     if service_key != "youtube":
         raise FocusOpenError(f"Неизвестный сервис: {service_key}")
 
@@ -552,6 +550,20 @@ def helper_command(*args: str) -> None:
             "Системный помощник недоступен. Нужна однократная установка Focus Open. "
             + result.stderr.strip()
         )
+
+
+def helper_json(command: str, argument: str | None = None, payload: Any = None) -> dict[str, Any]:
+    args = ["/usr/bin/sudo", "-n", str(HELPER_PATH), command]
+    if argument is not None:
+        args.append(argument)
+    result = subprocess.run(args, input=json.dumps(payload) if payload is not None else "",
+                            text=True, capture_output=True, timeout=30, check=False)
+    if result.returncode:
+        raise FocusOpenError(result.stderr.strip() or "Системный контроль YouTube недоступен.")
+    try:
+        return json.loads(result.stdout) if result.stdout.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise FocusOpenError("Системный помощник вернул некорректный ответ.") from exc
 
 
 def update_hosts_for_service(service_key: str, unlock: bool, seconds: int = 60) -> None:
@@ -704,6 +716,46 @@ def open_app(app_name: str) -> None:
 
 
 def open_url(url: str, browser_app: str | None = None) -> None:
+    if browser_app == DEFAULT_BROWSER_APP and (urlparse(url).hostname or "") in SERVICES["youtube"].allowed_domains:
+        if urlparse(url).path == "/playlist":
+            playlist_ids = parse_qs(urlparse(url).query).get("list", [])
+            for item in youtube_policy()["playlists"]:
+                if playlist_ids == [item["id"]]:
+                    url = youtube_course_entry(item)
+                    break
+        # Arc's external-link/Little Arc path may create a tab whose URL is
+        # not visible to automation until selected. Use its native main window.
+        quoted = json.dumps(url, ensure_ascii=False)
+        script = '\n'.join([
+            'tell application "Arc"',
+            'activate',
+            'repeat 20 times',
+            'if (count of windows) > 0 then exit repeat',
+            'delay 0.25',
+            'end repeat',
+            'if (count of windows) is 0 then error "Открой главное окно Arc"',
+            'set knownIds to {}',
+            'repeat with t in tabs of front window',
+            'set end of knownIds to (id of t) as text',
+            'end repeat',
+            'tell front window to make new tab with properties {URL:' + quoted + '}',
+            'set didOpen to false',
+            'repeat with t in tabs of front window',
+            'if ((id of t) as text) is not in knownIds then',
+            'set URL of t to ' + quoted,
+            'select t',
+            'set didOpen to true',
+            'exit repeat',
+            'end if',
+            'end repeat',
+            'if not didOpen then error "Не удалось открыть контролируемую вкладку YouTube"',
+            'return "OK"',
+            'end tell',
+        ])
+        result = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True, text=True, timeout=15)
+        if result.returncode or result.stdout.strip() != "OK":
+            raise FocusOpenError(result.stderr.strip() or "Не удалось открыть контролируемую вкладку Arc.")
+        return
     command = ["/usr/bin/open"]
     if browser_app:
         command.extend(["-a", browser_app])
@@ -763,16 +815,8 @@ def wait_for_allowed_browser_url(service_key: str, expected_url: str, browser_ap
 
 
 def ensure_cooldown_allows(state: dict[str, Any], service_key: str, current_time: dt.datetime) -> None:
-    service = service_state(state, service_key)
-    last = parse_iso_datetime(service.get("last_opened_at"))
-    cooldown = int(service.get("cooldown_seconds", DEFAULT_COOLDOWN_SECONDS))
-    remaining = cooldown_remaining(last, current_time, cooldown)
-    if remaining > 0:
-        available_at = current_time + dt.timedelta(seconds=remaining)
-        raise FocusOpenError(
-            f"Cooldown активен. Осталось {format_duration(remaining)}. "
-            f"Можно снова не раньше: {available_at.isoformat(timespec='seconds')}"
-        )
+    if service_used_today(state, service_key, current_time):
+        raise FocusOpenError(SERVICES[service_key].display_name + " уже открывался сегодня. Следующее открытие — после полуночи по Москве.")
 
 
 def final_summary(
@@ -792,6 +836,156 @@ def final_summary(
     )
 
 
+def youtube_policy() -> dict[str, Any]:
+    try:
+        value = json.loads(YOUTUBE_POLICY_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise FocusOpenError("Защищённые учебные плейлисты ещё не установлены.") from exc
+    if value.get("schema_version") != 1:
+        raise FocusOpenError("Неизвестный формат списка учебных плейлистов.")
+    return value
+
+
+def print_youtube_return_links(policy: dict[str, Any]) -> None:
+    for playlist in policy["playlists"]:
+        print(f"Учебный плейлист: {playlist['title']}")
+        print(youtube_course_entry(playlist))
+        print(f"Вернуться к лекциям: youtube --course {playlist.get('alias', playlist['id'])}")
+    for channel in policy.get('channels', []):
+        print(f"Учебный канал: {channel['title']}")
+        print(youtube_channel_entry(channel))
+        print(f"Открыть канал: youtube --course {channel.get('alias', channel['id'])}")
+
+
+def youtube_course_entry(playlist: dict[str, Any]) -> str:
+    return f"https://www.youtube.com/watch?v={playlist['videos'][0]['id']}&list={playlist['id']}"
+
+
+def youtube_channel_entry(channel: dict[str, Any]) -> str:
+    return f"https://www.youtube.com/channel/{channel['id']}/videos"
+
+
+def youtube_target(raw_url: str | None, course: str | None, policy: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    playlists = policy["playlists"]
+    if course:
+        for channel in policy.get('channels', []):
+            if course in {channel['id'], channel.get('alias')}:
+                return (youtube_channel_entry(channel), {'channel_id': channel['id']})
+        for playlist in playlists:
+            if course in {playlist["id"], playlist.get("alias")}:
+                return (youtube_course_entry(playlist), {"playlist_id": playlist["id"]})
+        raise FocusOpenError("Такой учебный плейлист не добавлен.")
+    if not raw_url:
+        print("Лекции из белого списка доступны постоянно.")
+        print_youtube_return_links(policy)
+        raw_url = prompt_text(SERVICES["youtube"].input_prompt)
+    url = normalize_url_input(raw_url)
+    parsed = urlparse(url)
+    if parsed.hostname in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+        for channel in policy.get('channels', []):
+            for prefix in ('/channel/' + channel['id'], '/@' + channel['handle'].lower()):
+                path = parsed.path.rstrip('/')
+                if path.startswith('/@'):
+                    path = path.lower()
+                if path in {prefix + suffix for suffix in ('', '/featured', '/videos', '/streams', '/shorts', '/playlists')}:
+                    return (youtube_channel_entry(channel), {'channel_id': channel['id']})
+        if parsed.path.startswith('/shorts/'):
+            video_id = parsed.path[len('/shorts/'):].strip('/')
+            uploads = {c['uploads_playlist_id'] for c in policy.get('channels', [])}
+            channel_video_ids = {v['id'] for p in playlists if p['id'] in uploads for v in p['videos']}
+            if re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id) and video_id in channel_video_ids:
+                return (f'https://www.youtube.com/watch?v={video_id}', {'video_id': video_id})
+    if parsed.hostname in {"youtube.com", "www.youtube.com", "m.youtube.com"} and parsed.path == "/playlist":
+        ids = parse_qs(parsed.query).get("list", [])
+        if len(ids) != 1:
+            raise FocusOpenError("Нужна ссылка на один разрешённый плейлист.")
+        return youtube_target(None, ids[0], policy)
+    validation = validate_url("youtube", url)
+    video_id = extract_youtube_video_id(url)
+    if not validation.allowed or not video_id or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise FocusOpenError(validation.reason or "Нужна корректная ссылка на конкретное видео YouTube.")
+    # Canonicalize away arbitrary playlist parameters: the root service checks actual membership.
+    return (f"https://www.youtube.com/watch?v={video_id}", {"video_id": video_id, "seconds": 12 * 60})
+
+
+def prepare_youtube_browser() -> None:
+    # Restore Arc's windows while hosts are still blocked. The root helper can
+    # then remove stale YouTube tabs before it grants the requested scope.
+    script = '\n'.join([
+        'tell application "Arc"', 'activate', 'repeat 20 times',
+        'if (count of windows) > 0 then exit repeat', 'delay 0.25', 'end repeat',
+        'if (count of windows) is 0 then error "Открой главное окно Arc"',
+        'return "OK"', 'end tell',
+    ])
+    result = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True, text=True, timeout=15)
+    if result.returncode or result.stdout.strip() != "OK":
+        raise FocusOpenError(result.stderr.strip() or "Не удалось подготовить окно Arc.")
+
+
+def run_youtube(raw_url: str | None = None, course: str | None = None,
+                browser_app: str = DEFAULT_BROWSER_APP, disable_browser_guard: bool = False) -> int:
+    if browser_app != DEFAULT_BROWSER_APP or disable_browser_guard:
+        raise FocusOpenError("Контроль видео YouTube обязателен; открытие начинается в Arc.")
+    policy = youtube_policy()
+    url, request = youtube_target(raw_url, course, policy)
+    # Print before opening: these links remain in terminal scrollback even
+    # when navigation immediately revokes access or the browser fails to open.
+    print(f"Открываемая ссылка: {url}")
+    print_youtube_return_links(policy)
+    with exclusive_lock():
+        state = load_state()
+        study_ids = {v['id'] for p in policy['playlists'] for v in p['videos']}
+        study_playlists = {p['id'] for p in policy['playlists']}
+        study_channels = {c['id'] for c in policy.get('channels', [])}
+        is_study = request.get("video_id") in study_ids or request.get("playlist_id") in study_playlists or request.get('channel_id') in study_channels
+        if is_study:
+            helper_json("guard-check")
+            open_url(url, browser_app)
+            print("Лекции из белого списка доступны постоянно, без таймера.")
+            return 0
+        root_status = helper_json("youtube-status")
+        if root_status.get("lease"):
+            raise FocusOpenError("Уже идёт временная сессия. Дождись её завершения.")
+        helper_json("guard-check")
+        prepare_youtube_browser()
+        previous = json.loads(json.dumps(state))
+        grant = helper_json("lease", "youtube", request)
+        scope = grant["scope"]
+        opened_at = now_local()
+        seconds = max(1, int(grant["deadline"] - opened_at.timestamp()))
+        append_history(state, "youtube", url, "Учебный плейлист" if scope["mode"] == "playlist" else "", seconds, opened_at, None)
+        if scope["mode"] == "playlist":
+            # Course viewing must not reset the ordinary-video cooldown.
+            state["services"]["youtube"] = previous.get("services", {}).get("youtube", {})
+        state["history"][-1]["access_granted"] = True
+        state["history"][-1]["youtube_mode"] = scope["mode"]
+        state["active_unlock"] = {"service": "youtube", "url": url, "started_at": opened_at.isoformat(),
+                                  "ends_at": dt.datetime.fromtimestamp(grant["deadline"], opened_at.tzinfo).isoformat(),
+                                  "youtube_mode": scope["mode"]}
+        try:
+            save_state(state)
+            open_url(url, browser_app)
+            if scope["mode"] == "video":
+                duration = get_youtube_duration_seconds(url)
+                if duration is not None:
+                    total = min(duration + YOUTUBE_BUFFER_SECONDS, 6 * 60 * 60)
+                    updated = helper_json("youtube-duration", payload=total)
+                    state["history"][-1]["duration_seconds"] = total
+                    state["active_unlock"]["ends_at"] = dt.datetime.fromtimestamp(updated["deadline"], opened_at.tzinfo).isoformat()
+                    save_state(state)
+        except BaseException:
+            restore_all_hosts_blocks()
+            state.pop("active_unlock", None)
+            state["history"][-1]["closed_at"] = now_local().isoformat()
+            save_state(state)
+            raise
+        ends_at = parse_iso_datetime(state["active_unlock"]["ends_at"])
+        print("YouTube: только выбранное видео")
+        print(f"Автоблокировка: {ends_at.strftime('%H:%M')}.")
+        print("Посторонний ролик закрывается. Доступ к лекциям из белого списка сохраняется.")
+    return 0
+
+
 def run_service(
     service_key: str,
     raw_url: str | None = None,
@@ -800,83 +994,30 @@ def run_service(
     url_monitor_enabled: bool = DEFAULT_URL_MONITOR_ENABLED,
     disable_browser_reopen: bool = False,
 ) -> int:
-    config = SERVICES[service_key]
+    if service_key == "youtube":
+        return run_youtube(raw_url, browser_app=browser_app, disable_browser_guard=disable_browser_guard)
+    if service_key not in SHORT_SOCIAL_HOMES:
+        raise FocusOpenError("Неизвестный сервис.")
+    homepage = SHORT_SOCIAL_HOMES[service_key]
+    if browser_app != DEFAULT_BROWSER_APP or disable_browser_guard:
+        raise FocusOpenError("Контроль вкладок обязателен; открытие начинается в Arc.")
     with exclusive_lock():
         state = load_state()
         current_time = now_local()
-        active = state.get("active_unlock") or {}
-        if active.get("service") == "telegram" and service_block_status("telegram") == "temporarily unlocked":
-            raise FocusOpenError("Telegram access is already active. Дождись завершения сессии.")
-
-        url = raw_url.strip() if raw_url else prompt_text(config.input_prompt)
-        validation = validate_url(service_key, url)
-        if not validation.allowed:
-            raise FocusOpenError(validation.reason)
-        url = validation.normalized_url
-        ensure_content_limit(state, service_key, url)
         ensure_cooldown_allows(state, service_key, current_time)
-
         helper_command("check")
-        if browser_app != DEFAULT_BROWSER_APP or disable_browser_guard:
-            raise FocusOpenError("Автоматический таймер поддерживает только Arc с browser guard.")
-        reason = ""
-
-        browser_guard = should_use_browser_guard(service_key, disable_browser_guard)
-        browser_prepared = False
-        browser_was_running_before_guard = app_is_running(browser_app) if browser_guard else False
-        youtube_duration = None
-        if service_key == "youtube" and shutil.which("yt-dlp") is not None:
-            if browser_guard:
-                prepare_browser_guard(browser_app)
-                browser_prepared = True
-            youtube_duration = get_youtube_duration_with_temporary_hosts_unlock(url)
-
-        access_seconds = compute_access_seconds(service_key, url, validation, youtube_duration=youtube_duration)
-
-        opened_at = now_local()
-        append_history(state, service_key, url, reason, access_seconds, opened_at, None)
-        state["history"][-1]["access_granted"] = False
+        helper_json("guard-check")
+        # No browser restart: the daemon expires this window and closes only
+        # Instagram tabs, preserving lectures and unrelated browser work.
+        helper_command("lease", service_key, str(INSTAGRAM_ACCESS_SECONDS))
+        append_history(state, service_key, homepage, "", INSTAGRAM_ACCESS_SECONDS, current_time, None)
+        state["history"][-1]["access_granted"] = True
+        state["active_unlock"] = {"service": service_key, "url": homepage,
+                                  "started_at": current_time.isoformat(),
+                                  "ends_at": (current_time + dt.timedelta(seconds=INSTAGRAM_ACCESS_SECONDS)).isoformat()}
         save_state(state)
-        opened = False
-        try:
-            if browser_guard and not browser_prepared:
-                prepare_browser_guard(browser_app)
-            update_hosts_for_service(service_key, unlock=True, seconds=access_seconds)
-            state["history"][-1]["access_granted"] = True
-            save_state(state)
-            flush_dns()
-            set_active_unlock(state, service_key, url)
-            opened = True
-            open_url(url, browser_app if browser_guard else None)
-            if browser_guard and url_monitor_enabled:
-                wait_for_allowed_browser_url(service_key, url, browser_app, POST_OPEN_VERIFY_SECONDS)
-                sleep_with_browser_monitor(access_seconds, service_key, url, browser_app)
-            else:
-                sleep_with_countdown(access_seconds)
-        finally:
-            restore_error: Exception | None = None
-            try:
-                restore_all_hosts_blocks()
-                flush_dns()
-                if should_reopen_browser_after_guard(browser_guard, browser_was_running_before_guard, disable_browser_reopen):
-                    open_app(browser_app)
-            except Exception as exc:
-                restore_error = exc
-                print(
-                    "КРИТИЧЕСКАЯ ОШИБКА: автоматическое восстановление /etc/hosts не удалось. "
-                    "Запусти: python3 ~/.local/bin/focus_open.py restore",
-                    file=sys.stderr,
-                )
-                print(f"Причина: {exc}", file=sys.stderr)
-            state = load_state()
-            if restore_error is None:
-                set_active_unlock(state, None)
-            history = state.get("history", [])
-            if history and restore_error is None:
-                history[-1]["closed_at"] = now_local().isoformat()
-                save_state(state)
-            if restore_error is not None:
-                raise FocusOpenError("Не удалось автоматически восстановить блокировку.") from restore_error
+        open_url(homepage, browser_app)
+        print(SERVICES[service_key].display_name + " открыт на 2 минуты. Следующий доступ — после полуночи по Москве.")
     return 0
 
 
@@ -910,12 +1051,7 @@ def print_status() -> int:
         last = parse_iso_datetime(service.get("last_opened_at"))
         cooldown = int(service.get("cooldown_seconds", config.cooldown_seconds))
         remaining = cooldown_remaining(last, current_time, cooldown)
-        if key == "telegram":
-            availability = "already used today" if telegram_used_today(state, current_time) else "available today"
-        elif remaining:
-            availability = f"cooldown {format_duration(remaining)} left"
-        else:
-            availability = "available now"
+        availability = "уже использован сегодня" if service_used_today(state, key, current_time) else "доступен сегодня"
         print(f"{config.display_name}: {availability}; hosts: {service_block_status(key)}")
     for key, config in PERMANENT_BLOCKS.items():
         print(f"{config.display_name}: permanently blocked; hosts: {service_block_status(key)}")
@@ -981,6 +1117,7 @@ def print_install_zsh() -> int:
     print(f"alias youtube='python3 {script_path} youtube'")
     print(f"alias telegram='python3 {script_path} telegram'")
     print(f"alias instagram='python3 {script_path} instagram'")
+    print(f"alias x='python3 {script_path} x'")
     print(f"alias social-open='python3 {script_path} open'")
     return 0
 
@@ -997,19 +1134,22 @@ def build_parser() -> argparse.ArgumentParser:
     telegram_parser = subparsers.add_parser("telegram")
     telegram_parser.add_argument("--set-minutes", type=int, metavar="MINUTES")
     youtube_parser = subparsers.add_parser("youtube")
+    youtube_parser.add_argument("--course", metavar="COURSE")
+    youtube_parser.add_argument("--courses", action="store_true")
     youtube_parser.add_argument("--browser-app", default=DEFAULT_BROWSER_APP)
     youtube_parser.add_argument("--no-browser-guard", action="store_true")
     youtube_parser.add_argument("--no-browser-reopen", action="store_true")
     youtube_parser.add_argument("--url-monitor", action="store_true")
 
-    instagram_parser = subparsers.add_parser("instagram")
-    instagram_parser.add_argument("--browser-app", default=DEFAULT_BROWSER_APP)
-    instagram_parser.add_argument("--no-browser-guard", action="store_true")
-    instagram_parser.add_argument("--no-browser-reopen", action="store_true")
-    instagram_parser.add_argument("--url-monitor", action="store_true")
+    for key in ("instagram", "x"):
+        social_parser = subparsers.add_parser(key)
+        social_parser.add_argument("--browser-app", default=DEFAULT_BROWSER_APP)
+        social_parser.add_argument("--no-browser-guard", action="store_true")
+        social_parser.add_argument("--no-browser-reopen", action="store_true")
+        social_parser.add_argument("--url-monitor", action="store_true")
 
     open_parser = subparsers.add_parser("open")
-    open_parser.add_argument("--service", required=True, choices=sorted(CONTENT_LIMITS))
+    open_parser.add_argument("--service", required=True, choices=sorted(BROWSER_GUARD_SERVICES))
     open_parser.add_argument("--url", required=True)
     open_parser.add_argument("--browser-app", default=DEFAULT_BROWSER_APP)
     open_parser.add_argument("--no-browser-guard", action="store_true")
@@ -1030,7 +1170,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "telegram":
             return run_telegram(args.set_minutes)
-        if args.command in CONTENT_LIMITS:
+        if args.command == "youtube":
+            if args.courses:
+                for item in youtube_policy()["playlists"]:
+                    print(f"{item.get('alias', item['id'])}: {item['title']} ({len(item['videos'])} видео)")
+                print_youtube_return_links(youtube_policy())
+                return 0
+            return run_youtube(course=args.course, browser_app=args.browser_app, disable_browser_guard=args.no_browser_guard)
+        if args.command in BROWSER_GUARD_SERVICES:
             return run_service(
                 args.command,
                 browser_app=args.browser_app,

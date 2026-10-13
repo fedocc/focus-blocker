@@ -48,10 +48,12 @@ class MetadataTests(unittest.TestCase):
                 with patch.object(f.subprocess,'run',return_value=Mock(returncode=0,stdout=value)):
                     self.assertIsNone(f.get_youtube_duration_seconds(URL))
 
-    def test_timeout_always_restores_metadata_unlock(self):
-        with patch.object(f,'helper_command'),patch.object(f,'get_youtube_duration_seconds',return_value=None),patch.object(f,'restore_all_hosts_blocks') as restore:
-            self.assertIsNone(f.get_youtube_duration_with_temporary_hosts_unlock(URL))
-        restore.assert_called_once()
+    def test_metadata_cannot_create_a_broad_untracked_unlock(self):
+        with patch.object(f,'helper_command') as helper,patch.object(f,'restore_all_hosts_blocks') as restore:
+            with self.assertRaises(f.FocusOpenError):
+                f.get_youtube_duration_with_temporary_hosts_unlock(URL)
+        helper.assert_not_called()
+        restore.assert_not_called()
 
 if __name__=='__main__':
     unittest.main()

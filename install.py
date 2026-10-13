@@ -1,163 +1,270 @@
 #!/usr/bin/python3 -I
-"""Install the fixed-scope helper and client. Run once with sudo."""
-import datetime
+"""Install the complete focus service without resetting protected quotas."""
+import copy
+import datetime as dt
+import fcntl
 import json
 import os
 from pathlib import Path
 import plistlib
 import pwd
-import shutil
+import re
+import shlex
+import stat
 import subprocess
 import sys
+import tempfile
 import time
+from urllib.parse import parse_qs, urlparse
 
 SOURCE = Path(__file__).resolve().parent
 BASE = Path('/Library/PrivilegedHelperTools/focus-open')
 PLIST = Path('/Library/LaunchDaemons/local.focus-open.timer.plist')
 RULE = Path('/private/etc/sudoers.d/focus-open')
-# https://core.telegram.org/mtproto/transports
-TELEGRAM_DOMAINS = ['web.telegram.org'] + [
+HOSTS = Path('/private/etc/hosts')
+ROOT_FILES = ('focus-helper', 'focus_youtube_guard.py', 'focus_service_policy.py', 'focus_playlist_sync.py')
+YOUTUBE_DOMAINS = ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be', 'www.youtu.be',
+                   'youtube-nocookie.com', 'www.youtube-nocookie.com', 'googlevideo.com', 'www.googlevideo.com',
+                   'ytimg.com', 'www.ytimg.com', 'i.ytimg.com', 's.ytimg.com', 'youtubei.googleapis.com',
+                   'music.youtube.com', 'studio.youtube.com', 'kids.youtube.com')
+INSTAGRAM_DOMAINS = ('instagram.com', 'www.instagram.com', 'm.instagram.com', 'i.instagram.com',
+                     'api.instagram.com', 'graph.instagram.com', 'help.instagram.com', 'business.instagram.com',
+                     'about.instagram.com', 'creators.instagram.com', 'l.instagram.com', 'static.cdninstagram.com',
+                     'scontent.cdninstagram.com', 'cdninstagram.com', 'www.cdninstagram.com', 'ig.me', 'www.ig.me')
+TELEGRAM_DOMAINS = ('web.telegram.org',) + tuple(
     f'{name}{suffix}.web.telegram.org'
     for name in ('pluto', 'venus', 'aurora', 'vesta', 'flora', 'kws1', 'kws2', 'kws3', 'kws4', 'kws5')
-    for suffix in ('', '-1')
-]
-VKVIDEO_DOMAINS = [
-    'vkvideo.ru',
-    'www.vkvideo.ru',
-    'm.vkvideo.ru',
-    'api.vkvideo.ru',
-    'live.vkvideo.ru',
-    'api.live.vkvideo.ru',
-    'video.vk.com',
-]
+    for suffix in ('', '-1')) + ('t.me', 'www.t.me', 'telegram.me', 'www.telegram.me')
+VKVIDEO_DOMAINS = ('vkvideo.ru', 'www.vkvideo.ru', 'm.vkvideo.ru', 'api.vkvideo.ru',
+                   'live.vkvideo.ru', 'api.live.vkvideo.ru', 'video.vk.com')
 
 
-def hosts_block(text, block_name, domains):
-    start = f'# === FOCUS_BLOCK:{block_name} START ==='
-    end = f'# === FOCUS_BLOCK:{block_name} END ==='
-    block = start + '\n' + ''.join(
-        f'{ip} {domain}\n'
-        for ip in ('127.0.0.1', '::1')
-        for domain in domains
-    ) + end + '\n'
+def hosts_block(text, name, domains):
+    start, end = '# === FOCUS_BLOCK:' + name + ' START ===', '# === FOCUS_BLOCK:' + name + ' END ==='
+    if text.count(start) > 1 or text.count(end) > 1:
+        raise RuntimeError('Duplicate hosts block: ' + name)
+    block = start + '\n' + ''.join(f'{ip} {domain}\n' for ip in ('127.0.0.1', '::1') for domain in domains) + end + '\n'
     if start in text or end in text:
-        if start not in text or end not in text:
-            raise RuntimeError(f'Incomplete hosts block: {block_name}')
-        a = text.index(start)
-        b = text.index(end, a) + len(end)
+        if start not in text or end not in text or text.index(end) < text.index(start):
+            raise RuntimeError('Incomplete hosts block: ' + name)
+        a, b = text.index(start), text.index(end) + len(end)
         return text[:a] + block.rstrip('\n') + text[b:]
     return text + ('\n' if text.endswith('\n') else '\n\n') + block
 
-def telegram_hosts(text):
-    return hosts_block(text, 'TELEGRAM', TELEGRAM_DOMAINS)
+
+def merge_policy(existing, incoming):
+    if existing is None:
+        return copy.deepcopy(incoming)
+    if existing.get('schema_version') != 1 or not isinstance(existing.get('playlists'), list):
+        raise RuntimeError('Existing YouTube policy is invalid; refusing to reset it')
+    result = copy.deepcopy(existing)
+    for playlist in incoming['playlists']:
+        matches = [p for p in result['playlists'] if p['id'] == playlist['id']]
+        if not matches:
+            result['playlists'].append(copy.deepcopy(playlist))
+        else:
+            target = matches[0]
+            if target.get('owner_id') not in (None, playlist.get('owner_id')):
+                raise RuntimeError('Approved playlist owner conflict')
+            for key in ('owner_id', 'auto_refresh', 'refresh_interval_seconds'):
+                if key in playlist:
+                    target[key] = playlist[key]
+            # Retain live video caches, custom aliases and titles on reinstall.
+    for channel in incoming.get('channels', []):
+        channels = result.setdefault('channels', [])
+        if not any(c['id'] == channel['id'] for c in channels):
+            channels.append(copy.deepcopy(channel))
+    return result
 
 
-def permanent_hosts(text):
-    return hosts_block(text, 'VKVIDEO', VKVIDEO_DOMAINS)
+def migrate_youtube_usage(state):
+    result = {'last_regular_opened_at': None, 'counts': {}}
+    dates = []
+    last = state.get('services', {}).get('youtube', {}).get('last_opened_at')
+    if last:
+        dates.append(last)
+    for entry in state.get('history', []):
+        if entry.get('service') != 'youtube' or not entry.get('access_granted', True):
+            continue
+        parsed = urlparse(entry.get('url', ''))
+        host = (parsed.hostname or '').lower()
+        if host == 'youtu.be':
+            video = parsed.path.strip('/')
+        elif host in ('youtube.com', 'www.youtube.com', 'm.youtube.com') and parsed.path == '/watch':
+            video = parse_qs(parsed.query).get('v', [''])[0]
+        else:
+            video = ''
+        if re.fullmatch(r'[A-Za-z0-9_-]{11}', video):
+            result['counts'][video] = result['counts'].get(video, 0) + 1
+        if entry.get('opened_at'):
+            dates.append(entry['opened_at'])
+    times = []
+    for value in dates:
+        parsed = dt.datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise RuntimeError('Missing timezone in legacy YouTube history')
+        times.append(parsed.timestamp())
+    if times:
+        result['last_regular_opened_at'] = max(times)
+    return result
+
+
+def sudoers_text(username):
+    helper = str(BASE / 'focus-helper')
+    commands = ('check', 'restore', 'lease youtube', 'lease instagram', 'lease x', 'lease telegram',
+                'guard-check', 'youtube-status', 'youtube-policy', 'youtube-duration')
+    return username + ' ALL=(root) NOPASSWD: ' + ', '.join(helper + ' ' + c for c in commands) + '\n'
+
+
+def replace(path, data, mode, uid=0, gid=0):
+    if path.is_symlink():
+        raise RuntimeError('Refusing destination symlink: ' + str(path))
+    fd, name = tempfile.mkstemp(prefix=path.name + '.install.', dir=str(path.parent))
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chown(temporary, uid, gid)
+        temporary.chmod(mode)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def root_json(path, value, mode=0o600):
+    replace(path, (json.dumps(value, ensure_ascii=False) + '\n').encode(), mode)
+
+
+def secure_directory(path):
+    if path.is_symlink():
+        raise RuntimeError('Refusing directory symlink: ' + str(path))
+    path.mkdir(mode=0o755, parents=True, exist_ok=True)
+    if path.stat().st_uid != 0 or path.stat().st_mode & 0o022:
+        raise RuntimeError('Root-owned directory required: ' + str(path))
 
 
 def main():
     if os.geteuid() != 0:
-        raise SystemExit('Run: sudo /usr/bin/python3 -I ' + str(Path(__file__).resolve()))
+        raise SystemExit('Run: sudo /usr/bin/python3 -I ' + str(SOURCE / 'install.py'))
     username = os.environ.get('SUDO_USER', '')
-    if not username or username == 'root':
+    if not username or username == 'root' or not re.fullmatch(r'[A-Za-z0-9_-]+', username):
         raise SystemExit('Run sudo from your regular user account.')
     user = pwd.getpwnam(username)
-    if not all(c.isalnum() or c in '_-' for c in username):
-        raise SystemExit('Unsupported account name')
-    for name in ('focus-helper', 'focus_open.py'):
+    for name in ROOT_FILES + ('focus_open.py',):
         compile((SOURCE / name).read_text(), name, 'exec')
-    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
-    client = Path(user.pw_dir) / '.local/bin/focus_open.py'
-    client_backup = client.with_name('focus_open.py.backup-' + stamp)
-    if client.exists():
-        shutil.copy2(client, client_backup)
-    backup = Path('/private/etc/hosts.backup.focus_open.install-' + stamp)
-    shutil.copy2('/private/etc/hosts', backup)
-    hosts = Path('/private/etc/hosts')
-    updated_hosts = permanent_hosts(telegram_hosts(hosts.read_text()))
-    hosts_tmp = Path('/private/etc/hosts.focus-open.install.tmp')
-    hosts_tmp.write_text(updated_hosts)
-    hosts_tmp.chmod(0o644)
-    hosts_tmp.replace(hosts)
-    # User cannot replace any code that the sudo exception executes.
-    BASE.mkdir(parents=True, exist_ok=True)
-    if BASE.is_symlink():
-        raise SystemExit('Refusing symlink helper directory')
-    os.chown(BASE, 0, 0)
-    BASE.chmod(0o755)
-    for name in ('focus-helper',):
-        dest = BASE / name
-        if dest.is_symlink():
-            raise SystemExit('Refusing helper symlink')
-        shutil.copyfile(SOURCE / name, dest)
-        os.chown(dest, 0, 0)
-        dest.chmod(0o755)
-    (BASE / 'config.json').write_text(json.dumps({'username': username}))
-    (BASE / 'config.json').chmod(0o600)
-    data = {
-        'Label': 'local.focus-open.timer',
-        'ProgramArguments': ['/usr/bin/python3', '-I', str(BASE / 'focus-helper'), 'daemon'],
-        'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 1,
-        'StandardOutPath': '/var/log/focus-open.log',
-        'StandardErrorPath': '/var/log/focus-open.log',
-    }
-    PLIST.write_bytes(plistlib.dumps(data))
-    os.chown(PLIST, 0, 0)
-    PLIST.chmod(0o644)
-    subprocess.run(['/bin/launchctl', 'bootout', 'system/local.focus-open.timer'],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(['/bin/launchctl', 'bootstrap', 'system', str(PLIST)], check=True)
+    incoming = json.loads((SOURCE / 'youtube-policy.json').read_text())
+    secure_directory(BASE)
+    secure_directory(RULE.parent)
+    local = Path(user.pw_dir) / '.local'
+    if local.is_symlink() or (local / 'bin').is_symlink():
+        raise SystemExit('Refusing a symlink client directory')
+    local.mkdir(exist_ok=True)
+    (local / 'bin').mkdir(exist_ok=True)
+    os.chown(local, user.pw_uid, user.pw_gid)
+    os.chown(local / 'bin', user.pw_uid, user.pw_gid)
+    client = local / 'bin/focus_open.py'
+    state_path = Path(user.pw_dir) / '.focus_open/state.json'
+    if state_path.is_symlink() or state_path.parent.is_symlink():
+        raise SystemExit('Refusing symlink history')
+    state = json.loads(state_path.read_text()) if state_path.exists() else {'services': {}, 'history': []}
+    if not isinstance(state, dict) or not isinstance(state.get('services', {}), dict) or not isinstance(state.get('history', []), list):
+        raise SystemExit('Legacy client history is invalid; refusing to reset it')
+    stamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+    secure_directory(BASE / 'backups')
+    backup = BASE / 'backups' / ('install-' + stamp)
+    backup.mkdir(mode=0o700)
+    old = {}
+    label = 'system/local.focus-open.timer'
+    with (BASE / 'lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if (BASE / 'lease.json').exists():
+            raise SystemExit('A temporary session is active. Retry after it ends; its deadline is preserved.')
+        configuration = json.loads((BASE / 'config.json').read_text()) if (BASE / 'config.json').exists() else {}
+        if configuration.get('username', username) != username:
+            raise SystemExit('The installed focus service belongs to a different account.')
+        policy = merge_policy(json.loads((BASE / 'youtube-policy.json').read_text()) if (BASE / 'youtube-policy.json').exists() else None, incoming)
+        destinations = [BASE / name for name in ROOT_FILES] + [BASE / name for name in ('config.json', 'youtube-policy.json', 'youtube-usage.json', 'service-usage.json')] + [HOSTS, PLIST, RULE, client]
+        launchers = ('focus-open', 'youtube', 'instagram', 'x', 'telegram')
+        destinations += [local / 'bin' / name for name in launchers]
+        for path in destinations:
+            if path.is_symlink():
+                raise RuntimeError('Refusing destination symlink: ' + str(path))
+            if path.exists():
+                info = path.stat()
+                old[path] = (path.read_bytes(), stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid)
+                replace(backup / ('file-' + str(len(old))), old[path][0], 0o600)
+            else:
+                old[path] = None
+        root_json(backup / 'metadata.json', {str(p): {'mode': v[1], 'uid': v[2], 'gid': v[3]} if v else None for p, v in old.items()})
+        subprocess.run(['/bin/launchctl', 'bootout', label], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            for name in ROOT_FILES:
+                replace(BASE / name, (SOURCE / name).read_bytes(), 0o755 if name == 'focus-helper' else 0o644)
+            sys.path.insert(0, str(BASE))
+            import focus_service_policy as socials
+            import focus_youtube_guard as youtube
+            configuration.update(username=username, uid=user.pw_uid)
+            root_json(BASE / 'config.json', configuration)
+            root_json(youtube.POLICY, policy, 0o644)
+            youtube.read_policy()
+            # Reinstall never deletes, migrates or resets existing protected usage.
+            if not youtube.USAGE.exists():
+                root_json(youtube.USAGE, migrate_youtube_usage(state))
+            else:
+                youtube.read_usage()
+            if not socials.USAGE.exists():
+                root_json(socials.USAGE, socials.migrate_client_state(state))
+            else:
+                socials.read_usage()
+            text = HOSTS.read_text()
+            for name, domains in (('YOUTUBE', YOUTUBE_DOMAINS), ('INSTAGRAM', INSTAGRAM_DOMAINS), ('X', socials.X_HOSTS), ('TELEGRAM', TELEGRAM_DOMAINS), ('VKVIDEO', VKVIDEO_DOMAINS)):
+                text = hosts_block(text, name, domains)
+            replace(HOSTS, text.encode(), 0o644)
+            data = {'Label': 'local.focus-open.timer', 'ProgramArguments': ['/usr/bin/python3', '-I', str(BASE / 'focus-helper'), 'daemon'],
+                    'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 1,
+                    'StandardOutPath': '/var/log/focus-open.log', 'StandardErrorPath': '/var/log/focus-open.log'}
+            replace(PLIST, plistlib.dumps(data), 0o644)
+            rule_tmp = BASE / 'sudoers.new'
+            replace(rule_tmp, sudoers_text(username).encode(), 0o440)
+            subprocess.run(['/usr/sbin/visudo', '-c', '-f', str(rule_tmp)], check=True)
+            replace(RULE, rule_tmp.read_bytes(), 0o440)
+            replace(client, (SOURCE / 'focus_open.py').read_bytes(), 0o755, user.pw_uid, user.pw_gid)
+            for name in launchers:
+                args = '' if name == 'focus-open' else ' ' + name
+                script = '#!/bin/sh\nexec python3 ' + shlex.quote(str(client)) + args + ' "$@"\n'
+                replace(local / 'bin' / name, script.encode(), 0o755, user.pw_uid, user.pw_gid)
+            subprocess.run(['/bin/launchctl', 'bootstrap', 'system', str(PLIST)], check=True)
+        except BaseException:
+            subprocess.run(['/bin/launchctl', 'bootout', label], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for path, prior in old.items():
+                if prior:
+                    replace(path, *prior)
+                else:
+                    path.unlink(missing_ok=True)
+            if PLIST.exists():
+                subprocess.run(['/bin/launchctl', 'bootstrap', 'system', str(PLIST)], check=False)
+            raise
     for _ in range(30):
-        result = subprocess.run([str(BASE / 'focus-helper'), 'check'], capture_output=True)
-        if result.returncode == 0:
+        check = subprocess.run([str(BASE / 'focus-helper'), 'check'], capture_output=True)
+        if check.returncode == 0:
             break
         time.sleep(0.5)
     else:
-        raise SystemExit('Timer failed to start. Client and sudoers were not changed.')
-    RULE.parent.mkdir(mode=0o755, exist_ok=True)
-    rule_tmp = BASE / 'sudoers.new'
-    helper = str(BASE / 'focus-helper')
-    rule_tmp.write_text(
-        f'{username} ALL=(root) NOPASSWD: {helper} check, {helper} restore, '
-        f'{helper} lease youtube, {helper} lease instagram, {helper} lease telegram\n'
-    )
-    rule_tmp.chmod(0o440)
-    subprocess.run(['/usr/sbin/visudo', '-cf', str(rule_tmp)], check=True)
-    previous_rule = RULE.read_bytes() if RULE.exists() else None
-    if previous_rule is not None:
-        shutil.copy2(RULE, BASE / ('sudoers.backup-' + stamp))
-    try:
-        shutil.copyfile(rule_tmp, RULE)
-        os.chown(RULE, 0, 0)
-        RULE.chmod(0o440)
-        subprocess.run(['/usr/sbin/visudo', '-c'], check=True)
-        # Verify the actual user's noninteractive path before replacing the client.
-        subprocess.run(['/usr/bin/sudo', '-u', username, '/usr/bin/sudo', '-n', helper, 'check'], check=True)
-    except BaseException:
-        if previous_rule is None:
-            RULE.unlink(missing_ok=True)
-        else:
-            RULE.write_bytes(previous_rule)
-            RULE.chmod(0o440)
-        raise
-    shutil.copyfile(SOURCE / 'focus_open.py', client)
-    os.chown(client, user.pw_uid, user.pw_gid)
-    client.chmod(0o755)
-    for name in ('test_focus_open.py',):
-        target = client.with_name(name)
-        shutil.copyfile(SOURCE / name, target)
-        os.chown(target, user.pw_uid, user.pw_gid)
-    shell_config = Path(user.pw_dir) / '.zshrc'
-    alias = "alias telegram='python3 \"$HOME/.local/bin/focus_open.py\" telegram'"
-    existing_aliases = [line.strip() for line in shell_config.read_text().splitlines() if line.strip().startswith('alias telegram=')] if shell_config.exists() else []
-    if alias not in existing_aliases:
-        with shell_config.open('a') as file:
-            file.write('\n' + alias + '\n')
-    os.chown(shell_config, user.pw_uid, user.pw_gid)
-    print('Installed. Commands youtube, instagram and telegram are ready; no further sudo password needed.')
-    print('Previous client: ' + str(client_backup))
-    print('Hosts backup: ' + str(backup))
+        raise SystemExit('Files installed; timer startup unconfirmed. Access stays blocked. Backup: ' + str(backup))
+    subprocess.run(['/usr/bin/sudo', '-u', username, '/usr/bin/sudo', '-n', str(BASE / 'focus-helper'), 'check'], check=True)
+    shell = Path(user.pw_dir) / '.zshrc'
+    line = 'export PATH="$HOME/.local/bin:$PATH"'
+    if shell.is_symlink():
+        raise SystemExit('Installed. Add ~/.local/bin to PATH manually; .zshrc is a symlink.')
+    if not shell.exists() or line not in shell.read_text().splitlines():
+        with shell.open('a') as stream:
+            stream.write('\n' + line + '\n')
+        os.chown(shell, user.pw_uid, user.pw_gid)
+    print('Installed: youtube, instagram, x, telegram. Daily reset: midnight Europe/Moscow.')
+    print('Approve macOS Automation requests for your browser if prompted. Restart Terminal for new commands.')
+    print('Backup: ' + str(backup))
 
 
 if __name__ == '__main__':

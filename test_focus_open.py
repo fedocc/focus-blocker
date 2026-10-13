@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 import datetime as dt
+import contextlib
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 import focus_open
 
@@ -20,13 +24,20 @@ class FocusOpenPureFunctionTests(unittest.TestCase):
         ]:
             self.assertFalse(focus_open.validate_url("youtube", url).allowed, url)
 
-    def test_instagram_allows_posts_and_reels_only(self):
+    def test_instagram_allows_browsing_with_a_two_minute_session(self):
         self.assertTrue(focus_open.validate_url("instagram", "https://www.instagram.com/p/ABC123/").allowed)
         self.assertTrue(focus_open.validate_url("instagram", "https://instagram.com/reel/ABC123/").allowed)
         self.assertTrue(focus_open.validate_url("instagram", "https://www.instagram.com/reels/ABC123/").allowed)
-        self.assertFalse(focus_open.validate_url("instagram", "https://instagram.com/").allowed)
-        self.assertFalse(focus_open.validate_url("instagram", "https://instagram.com/explore/").allowed)
-        self.assertFalse(focus_open.validate_url("instagram", "https://instagram.com/stories/name/1/").allowed)
+        for url in [
+            "https://instagram.com/",
+            "https://instagram.com/explore/",
+            "https://instagram.com/stories/name/1/",
+            "https://instagram.com/reel/ABC123/",
+        ]:
+            validation = focus_open.validate_url("instagram", url)
+            self.assertTrue(validation.allowed)
+            self.assertEqual(focus_open.compute_access_seconds("instagram", url, validation), 120)
+        self.assertFalse(focus_open.validate_url("instagram", "https://example.com/").allowed)
 
     def test_reason_requires_five_words_and_twelve_chars(self):
         self.assertFalse(focus_open.reason_is_valid("надо видео"))
@@ -42,7 +53,7 @@ class FocusOpenPureFunctionTests(unittest.TestCase):
         self.assertFalse(focus_open.browser_url_allowed("youtube", expected, other_video))
         self.assertFalse(focus_open.browser_url_allowed("youtube", expected, home))
 
-    def test_instagram_shortcode_matching_for_browser_monitor(self):
+    def test_instagram_browser_monitor_allows_navigation_within_instagram(self):
         expected = "https://www.instagram.com/reel/ABC123/"
         same = "https://instagram.com/reel/ABC123/?utm_source=ig_web_copy_link"
         plural_same = "https://www.instagram.com/reels/ABC123/"
@@ -51,9 +62,10 @@ class FocusOpenPureFunctionTests(unittest.TestCase):
         reels_surface = "https://www.instagram.com/reels/"
         self.assertTrue(focus_open.browser_url_allowed("instagram", expected, same))
         self.assertTrue(focus_open.browser_url_allowed("instagram", expected, plural_same))
-        self.assertFalse(focus_open.browser_url_allowed("instagram", expected, other_reel))
-        self.assertFalse(focus_open.browser_url_allowed("instagram", expected, home))
-        self.assertFalse(focus_open.browser_url_allowed("instagram", expected, reels_surface))
+        self.assertTrue(focus_open.browser_url_allowed("instagram", expected, other_reel))
+        self.assertTrue(focus_open.browser_url_allowed("instagram", expected, home))
+        self.assertTrue(focus_open.browser_url_allowed("instagram", expected, reels_surface))
+        self.assertFalse(focus_open.browser_url_allowed("instagram", expected, "https://example.com/"))
 
     def test_transient_browser_urls_are_limited_to_internal_loading_pages(self):
         self.assertTrue(focus_open.is_transient_browser_url("about:blank"))
@@ -72,7 +84,7 @@ class FocusOpenPureFunctionTests(unittest.TestCase):
         )
         self.assertEqual(
             focus_open.browser_monitor_decision("instagram", expected, "https://www.instagram.com/reels/", within_grace=True),
-            "block",
+            "allow",
         )
         self.assertEqual(
             focus_open.browser_monitor_decision("instagram", expected, "https://www.instagram.com/reel/ABC123/", within_grace=False),
@@ -84,6 +96,14 @@ class FocusOpenPureFunctionTests(unittest.TestCase):
         last = now - dt.timedelta(seconds=7100)
         self.assertEqual(focus_open.cooldown_remaining(last, now, 7200), 100)
         self.assertEqual(focus_open.cooldown_remaining(last, now, 7000), 0)
+
+    def test_youtube_next_session_waits_until_moscow_midnight(self):
+        zone=focus_open.DAILY_TIMEZONE
+        opened=dt.datetime(2026,10,13,0,4,tzinfo=zone)
+        state={"services":{"youtube":{"last_opened_at":opened.isoformat()}}}
+        with self.assertRaises(focus_open.FocusOpenError):
+            focus_open.ensure_cooldown_allows(state,"youtube",dt.datetime(2026,10,13,23,59,tzinfo=zone))
+        focus_open.ensure_cooldown_allows(state,"youtube",dt.datetime(2026,10,14,0,0,tzinfo=zone))
 
     def test_youtube_buffer_is_two_minutes(self):
         self.assertEqual(focus_open.YOUTUBE_BUFFER_SECONDS, 2 * 60)
@@ -129,5 +149,6 @@ class FocusOpenPureFunctionTests(unittest.TestCase):
             focus_open.transform_hosts_block("127.0.0.1 youtube.com\n", "YOUTUBE", unlock=True)
 
 
-if __name__ == "__main__":
+
+if __name__ == '__main__':
     unittest.main()

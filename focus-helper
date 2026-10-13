@@ -9,13 +9,20 @@ import re
 import subprocess
 import sys
 import time
+import copy
 
 BASE = Path('/Library/PrivilegedHelperTools/focus-open')
+# Only this root-owned installation directory is added in isolated mode.
+sys.path.insert(0, str(BASE))
+import focus_youtube_guard as youtube
+import focus_service_policy as socials
+import focus_playlist_sync as playlist_sync
 HOSTS = Path('/etc/hosts')
 STATE = BASE / 'lease.json'
 HEARTBEAT = BASE / 'heartbeat'
 PREFIX = '# TEMP_FOCUS_UNLOCK '
-TEMPORARY_SERVICES = ('youtube', 'instagram', 'telegram')
+SOCIAL_SERVICES = tuple(socials.DURATIONS)
+TEMPORARY_SERVICES = ('youtube',) + SOCIAL_SERVICES
 PERMANENT_BLOCKS = ('vkvideo',)
 PERMANENT_DOMAINS = {
     'vkvideo': (
@@ -89,68 +96,262 @@ def read_lease():
     return json.loads(STATE.read_text()) if STATE.exists() else None
 
 
-def stop_browser():
-    config = json.loads((BASE / 'config.json').read_text())
-    # Fixed process and fixed installation owner; caller cannot select a target.
-    subprocess.run(['/usr/bin/killall', '-KILL', '-u', config['username'], 'Arc'],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+# Educational access is policy, never a lease. Only ordinary videos and social
+# windows occupy lease.json. Browser snapshots are shared across all guards.
+OBSERVED = {service: set() for service in TEMPORARY_SERVICES}
+
+
+def set_access(service, unlock):
+    text = HOSTS.read_text()
+    changed = transform(text, service, unlock)
+    if changed != text:
+        write_hosts(changed)
+        flush()
+
+
+def close_matching(predicate, observed=(), browsers=None):
+    try:
+        report = youtube.browser_report(strict_unsupported=False, browsers=browsers, tolerate_errors=True)
+    except Exception:
+        if not observed:
+            raise
+        youtube.force_stop_browsers(set(observed))
+        return
+    failures = set(getattr(report, 'errors', {}))
+    targets = youtube.targets_for(report, predicate)
+    names = {t['application'] for t in targets}
+    try:
+        youtube.close_tabs(targets)
+        verify = youtube.browser_report(strict_unsupported=False, browsers=names, tolerate_errors=True) if names else []
+        failures.update(getattr(verify, 'errors', {}))
+        remaining = {t['application'] for t in youtube.targets_for(verify, predicate)}
+        reset = remaining | (failures & (set(observed) | names))
+        if reset:
+            youtube.force_stop_browsers(reset)
+    except Exception:
+        reset = names | (set(observed) & failures)
+        if not reset:
+            raise
+        youtube.force_stop_browsers(reset)
+
+
+def revoke_lease():
+    current = read_lease()
+    if not current:
+        return
+    service = current['service']
+    set_access(service, False)
+    observed = current.get('observed_browsers', [])
+    if service == 'youtube':
+        study = youtube.study_scope(youtube.read_policy())
+        close_matching(lambda u: youtube.is_youtube_surface(u) and not youtube.url_allowed(study, u), observed)
+    else:
+        close_matching(lambda u: socials.service_for_url(u) == service, observed)
+    # Keep an unrevoked record if closure fails; the daemon can retry it.
+    STATE.unlink(missing_ok=True)
 
 
 def restore():
-    lease = read_lease()
-    text = HOSTS.read_text()
-    restored = text
-    for service in TEMPORARY_SERVICES:
-        restored = transform(restored, service, False)
-    restored = enforce_permanent_text(restored)
-    stop_error = None
-    if lease or restored != text:
-        # Restore hosts even if process termination itself encounters an error.
-        try:
-            stop_browser()
-        except Exception as error:
-            stop_error = error
-    if restored != text:
-        write_hosts(restored)
-    flush()
-    if stop_error is not None:
-        raise stop_error
-    if STATE.exists():
-        STATE.unlink()
+    revoke_lease()
+    for service in SOCIAL_SERVICES:
+        set_access(service, False)
+    guard_cycle()  # A manual restore cannot expire educational policy.
 
 
-def lease(service, seconds):
-    if service not in TEMPORARY_SERVICES or not 1 <= seconds <= 6 * 60 * 60:
+def timer_running():
+    # launchd owns the installed service identity. The helper may hold the
+    # shared lock during browser inspection, so heartbeat age is not a valid
+    # liveness test at the end of that same inspection.
+    result = subprocess.run(['/bin/launchctl', 'print', 'system/local.focus-open.timer'],
+                            capture_output=True, text=True, timeout=3)
+    if result.returncode or not re.search(r'^\s*state = running\s*$', result.stdout, re.MULTILINE):
+        return False
+    match = re.search(r'^\s*pid = ([0-9]+)\s*$', result.stdout, re.MULTILINE)
+    if not match:
+        return False
+    try:
+        os.kill(int(match.group(1)), 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def require_timer():
+    if not HEARTBEAT.exists() or not timer_running():
+        raise RuntimeError('Служба автоблокировки не запущена; доступ остаётся закрыт.')
+
+
+def require_observer():
+    health = json.loads(youtube.HEALTH.read_text()) if youtube.HEALTH.exists() else {}
+    age = time.time() - health.get('checked_at', 0)
+    if not health.get('ok') or age < -1 or age > 10:
+        raise RuntimeError(health.get('error') or 'Browser observer is unavailable')
+
+
+def lease_clock():
+    # macOS Python 3.9 time.monotonic() has a process-local epoch. POSIX
+    # CLOCK_MONOTONIC shares its origin between the grant CLI and the daemon.
+    return time.clock_gettime(time.CLOCK_MONOTONIC)
+
+
+def lease(service, seconds, youtube_scope=None):
+    if service not in TEMPORARY_SERVICES or isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 21600:
         raise ValueError('Invalid lease')
-    if not HEARTBEAT.exists() or time.time() - HEARTBEAT.stat().st_mtime > 3:
-        raise RuntimeError('Focus timer unavailable; access stays blocked')
+    if service == 'youtube' and (not youtube_scope or youtube_scope.get('mode') != 'video'):
+        raise ValueError('Only ordinary video access needs a temporary lease')
+    now = time.time()
+    previous = None
+    if service in socials.DURATIONS:
+        previous = socials.read_usage()
+        socials.validate(service, seconds, previous, now)
+    require_timer()
+    require_observer()
     if read_lease():
-        raise RuntimeError('Another lease is active')
+        raise RuntimeError('Another temporary lease is active')
+    # Check hosts configuration before reserving a protected quota.
     text = transform(HOSTS.read_text(), service, True)
-    # Persist deadline BEFORE unblocking, so even a crash is recoverable.
-    STATE.write_text(json.dumps({'service': service, 'deadline': time.time() + seconds}))
-    STATE.chmod(0o600)
+    mono = lease_clock()
+    value = {'service': service, 'started_at': now, 'started_monotonic': mono,
+             'deadline': now + seconds, 'deadline_monotonic': mono + seconds,
+             'timer_clock': 'system_monotonic_v1',
+             'observed_browsers': []}
+    if service == 'youtube':
+        value['youtube_scope'] = dict(youtube_scope, grace_until=now + 15)
+    youtube.atomic_json(STATE, value)
+    if previous is not None:
+        # Reserve before unblocking. Killing a caller or editing its state can
+        # never create another successful seven-minute Telegram window.
+        youtube.atomic_json(socials.USAGE, socials.reserve(service, previous, now))
     try:
         write_hosts(text)
         flush()
     except BaseException:
-        restore()
+        set_access(service, False)
         raise
+    return value
 
 
 def expire():
-    value = read_lease()
-    if value and time.time() >= value['deadline']:
-        restore()
+    current = read_lease()
+    if current and (time.time() >= current['deadline'] or
+                    (current.get('timer_clock') == 'system_monotonic_v1' and
+                     lease_clock() >= current.get('deadline_monotonic', float('inf')))):
+        revoke_lease()
 
 
 def enforce_permanent_blocks():
     text = HOSTS.read_text()
     enforced = enforce_permanent_text(text)
     if enforced != text:
-        stop_browser()
         write_hosts(enforced)
         flush()
+
+
+def remember_report(report, current):
+    for service in TEMPORARY_SERVICES:
+        predicate = youtube.is_youtube_surface if service == 'youtube' else lambda u: socials.service_for_url(u) == service
+        OBSERVED[service] = (OBSERVED[service] & set(getattr(report, 'errors', {}))) | {t['application'] for t in youtube.targets_for(report, predicate)}
+    if current:
+        names = sorted(OBSERVED[current['service']])
+        if names != current.get('observed_browsers', []):
+            current['observed_browsers'] = names
+            youtube.atomic_json(STATE, current)
+
+
+def guard_cycle():
+    current = read_lease()
+    study = youtube.study_scope(youtube.read_policy())
+    scope = dict(current['youtube_scope'], study_ids=study['allowed_ids'], playlist_ids=study['playlist_ids'], channel_ids=study.get('channel_ids', []), channel_paths=study.get('channel_paths', []), channel_video_ids=study.get('channel_video_ids', [])) if current and current['service'] == 'youtube' else study
+    try:
+        report = youtube.browser_report(tolerate_errors=True)
+        observer_errors = dict(getattr(report, 'errors', {}))
+        denied = youtube.targets_for(report, lambda u: youtube.is_youtube_surface(u) and not youtube.url_allowed(scope, u))
+        if denied:
+            set_access('youtube', False)
+            # An outside video revokes only the ordinary-video entitlement.
+            # Lectures and an unrelated Telegram/Instagram timer remain intact.
+            if current and current['service'] == 'youtube':
+                STATE.unlink(missing_ok=True)
+                current = None
+            report = youtube.browser_report(tolerate_errors=True)
+            observer_errors = dict(getattr(report, 'errors', {}))
+            targets = youtube.targets_for(report, lambda u: youtube.is_youtube_surface(u) and not youtube.url_allowed(study, u))
+            seen = {(t['application'], t['window'], t['tab']) for t in targets}
+            targets.extend(t for t in denied if (t['application'], t['window'], t['tab']) not in seen)
+            youtube.close_tabs(targets)
+            report = youtube.browser_report(tolerate_errors=True)
+            observer_errors = dict(getattr(report, 'errors', {}))
+            if youtube.targets_for(report, lambda u: youtube.is_youtube_surface(u) and not youtube.url_allowed(study, u)):
+                raise RuntimeError('Не удалось закрыть запрещённое видео')
+            preview = any(youtube.is_video_preview_url(t['url']) for t in targets)
+            youtube.record_event('preview_blocked' if preview else 'forbidden',
+                                 'Видеопредпросмотр закрыт; используйте прямую ссылку YouTube' if preview else 'Посторонняя вкладка закрыта; лекции доступны постоянно',
+                                 {t['application'] for t in targets})
+        for service in SOCIAL_SERVICES:
+            allowed = current is not None and current['service'] == service
+            set_access(service, allowed)
+            if not allowed:
+                targets = youtube.targets_for(report, lambda u: socials.service_for_url(u) == service)
+                if targets:
+                    youtube.close_tabs(targets)
+                    report = youtube.browser_report(tolerate_errors=True)
+                    observer_errors = dict(getattr(report, 'errors', {}))
+                    if youtube.targets_for(report, lambda u: socials.service_for_url(u) == service):
+                        raise RuntimeError('Не удалось закрыть вкладку ' + service)
+        remember_report(report, current)
+        # Always enabled after a successful observer pass, including an empty
+        # browser. Opening an approved lecture needs no command or renewal.
+        if observer_errors:
+            set_access('youtube', False)
+            # Reset cached denied connections only in the failed browser. The
+            # healthy Arc carrying Telegram is not selected for a Chrome error.
+            blocked = {'youtube'} | {s for s in SOCIAL_SERVICES if not current or current['service'] != s}
+            reset = set().union(*(OBSERVED[s] for s in blocked)) & set(observer_errors) & set(youtube.BROWSERS)
+            if reset:
+                youtube.force_stop_browsers(reset)
+                for names in OBSERVED.values():
+                    names.difference_update(reset)
+            detail = '; '.join(name + ': ' + error[:200] for name, error in observer_errors.items())
+            youtube.publish_health(False, detail)
+            youtube.record_event('observer_error', detail, observer_errors)
+            # The authorized social deadline remains unchanged even if a
+            # browser had to be reset. Reopening Telegram is still permitted.
+            return False
+        set_access('youtube', True)
+        youtube.publish_health(True)
+    except Exception as error:
+        set_access('youtube', False)
+        active_social = current['service'] if current and current['service'] in SOCIAL_SERVICES else None
+        blocked = {'youtube'}
+        for service in SOCIAL_SERVICES:
+            allowed = service == active_social
+            set_access(service, allowed)
+            if not allowed:
+                blocked.add(service)
+        names = set().union(*(OBSERVED[s] for s in blocked))
+        youtube.publish_health(False, str(error))
+        youtube.record_event('observer_error', str(error)[:500], names)
+        try:
+            close_matching(lambda u: youtube.is_youtube_surface(u) or socials.service_for_url(u) in blocked, names)
+        except Exception as cleanup_error:
+            youtube.record_event('cleanup_error', str(cleanup_error)[:500], names)
+            raise
+        # An observer failure is not an expiry. In particular, do not erase a
+        # valid Telegram/Instagram grant and leave it impossible to reopen.
+        if current and current['service'] == 'youtube':
+            STATE.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def startup():
+    # Revoke temporary grants on restart while retaining lecture tabs. Global
+    # YouTube DNS is opened only after the installed observer confirms policy.
+    set_access('youtube', False)
+    revoke_lease()
+    for service in SOCIAL_SERVICES:
+        set_access(service, False)
+    youtube.publish_health(False, 'Проверка после запуска')
 
 
 def main():
@@ -159,26 +360,88 @@ def main():
     args = sys.argv[1:]
     if args == ['daemon']:
         with locked():
-            restore()  # Restart/reboot always fails closed.
+            startup()
+        playlist_sync.start_worker(locked)
         while True:
             with locked():
-                expire()
-                enforce_permanent_blocks()
+                try:
+                    expire()
+                    enforce_permanent_blocks()
+                    guard_cycle()
+                except Exception as error:
+                    youtube.publish_health(False, str(error))
+                    youtube.record_event('daemon_error', str(error), [])
                 HEARTBEAT.touch()
             time.sleep(0.5)
-    # Never hold the global lock while waiting for caller input: the daemon
-    # must remain free to expire a different lease even if stdin stays open.
     duration = None
+    request = None
+    # Input is parsed outside the daemon lock, preventing an idle pipe from
+    # freezing every timer. No executable caller input reaches the observer.
     if len(args) == 2 and args[0] == 'lease' and args[1] in TEMPORARY_SERVICES:
+        if args[1] == 'youtube':
+            request = json.loads(sys.stdin.read(4096))
+        else:
+            duration = int(sys.stdin.read(16))
+    if args == ['youtube-duration']:
         duration = int(sys.stdin.read(16))
     with locked():
         if args == ['check']:
-            if not HEARTBEAT.exists() or time.time() - HEARTBEAT.stat().st_mtime > 3:
-                raise RuntimeError('Focus timer is not running')
+            require_timer()
         elif args == ['restore']:
             restore()
+        elif args == ['youtube-policy']:
+            print(json.dumps(youtube.read_policy(), ensure_ascii=False))
+        elif args == ['youtube-status']:
+            print(json.dumps({'usage': youtube.read_usage(), 'lease': read_lease(),
+                             'study': youtube.study_scope(youtube.read_policy()),
+                             'health': json.loads(youtube.HEALTH.read_text()) if youtube.HEALTH.exists() else None,
+                             'last_event': json.loads(youtube.LAST_EVENT.read_text()) if youtube.LAST_EVENT.exists() else None}, ensure_ascii=False))
+        elif args == ['guard-check']:
+            require_observer()
+        elif args == ['youtube-duration']:
+            current = read_lease()
+            if not current or current.get('youtube_scope', {}).get('mode') != 'video':
+                raise RuntimeError('No single-video session is active')
+            if duration is None or not 1 <= duration <= 21600:
+                raise ValueError('Invalid duration')
+            current['deadline'] = current['started_at'] + duration
+            current['deadline_monotonic'] = current['started_monotonic'] + duration
+            youtube.atomic_json(STATE, current)
+            print(json.dumps({'deadline': current['deadline']}))
         elif len(args) == 2 and args[0] == 'lease' and args[1] in TEMPORARY_SERVICES:
-            lease(args[1], duration)
+            if args[1] == 'youtube':
+                require_timer()
+                require_observer()
+                previous = youtube.read_usage()
+                scope = youtube.make_scope(request, youtube.read_policy(), previous, time.time())
+                if scope['mode'] == 'playlist':
+                    # Compatible with older terminal commands, but never creates
+                    # a timed educational grant or blocks a social window.
+                    print(json.dumps({'deadline': None, 'scope': scope}, ensure_ascii=False))
+                    return
+                if read_lease():
+                    raise RuntimeError('Another temporary lease is active')
+                youtube.prepare_session(scope)
+                require_timer()  # Recheck the actual service after native calls.
+                youtube.publish_health(True)  # This complete snapshot was verified now.
+                started = time.time()
+                usage = copy.deepcopy(previous)
+                usage['last_regular_opened_at'] = started
+                counts = usage.setdefault('counts', {})
+                counts[scope['allowed_ids'][0]] = counts.get(scope['allowed_ids'][0], 0) + 1
+                youtube.atomic_json(youtube.USAGE, usage)
+                try:
+                    value = lease('youtube', scope['seconds'], scope)
+                except BaseException:
+                    # A definite refusal before writing a lease grants no access.
+                    # Restore the reservation instead of consuming the cooldown.
+                    # An uncertain outcome with a lease stays reserved/fails closed.
+                    if not read_lease():
+                        youtube.atomic_json(youtube.USAGE, previous)
+                    raise
+                print(json.dumps({'deadline': value['deadline'], 'scope': scope}, ensure_ascii=False))
+            else:
+                lease(args[1], duration)
         else:
             raise ValueError('Unsupported command')
 
