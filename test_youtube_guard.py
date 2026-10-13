@@ -350,6 +350,70 @@ class RootIntegrationTests(unittest.TestCase):
         self.close.assert_not_called()
         self.force.assert_not_called()
 
+    def test_stop_youtube_preserves_lectures_and_does_not_refund_daily_use(self):
+        self.regular()
+        before={'last_regular_opened_at':time.time(),'counts':{OTHER:1}}
+        guard.atomic_json(guard.USAGE,before)
+        current=helper.read_lease()
+        self.report.side_effect=[self.tabs('https://youtu.be/'+OTHER,'https://youtu.be/'+VIDEO),self.tabs('https://youtu.be/'+VIDEO),self.tabs('https://youtu.be/'+VIDEO)]
+        result=helper.stop_session({'service':'youtube','started_at':current['started_at']})
+        self.assertTrue(result['stopped'])
+        self.assertIsNone(helper.read_lease())
+        self.assertEqual(guard.read_usage(),before)
+        self.assertFalse(helper.daily_available()['youtube'])
+        self.assertTrue(helper.daily_available()['instagram'])
+        self.assertEqual([t['url'] for t in self.close.call_args.args[0]],['https://youtu.be/'+OTHER])
+        self.force.assert_not_called()
+        helper.lease('instagram',120)
+        self.assertEqual(helper.read_lease()['service'],'instagram')
+
+    def test_stale_stop_token_cannot_end_a_new_session(self):
+        helper.lease('telegram',420)
+        current=helper.read_lease()
+        with self.assertRaises(RuntimeError):
+            helper.stop_session({'service':'youtube','started_at':current['started_at']})
+        with self.assertRaises(RuntimeError):
+            helper.stop_session({'service':'telegram','started_at':current['started_at']-1})
+        self.assertEqual(helper.read_lease(),current)
+        self.close.assert_not_called()
+
+    def test_invalid_stop_token_does_not_change_the_lease(self):
+        helper.lease('x',120)
+        current=helper.read_lease()
+        for token in ({},{'service':'x','started_at':True},{'service':'x','started_at':float('nan')},{'service':'x','started_at':current['started_at'],'seconds':21600}):
+            with self.assertRaises(ValueError):helper.stop_session(token)
+        self.assertEqual(helper.read_lease(),current)
+
+    def test_stop_after_expiry_is_an_idempotent_noop(self):
+        self.assertEqual(helper.stop_session({'service':'youtube','started_at':1}),{'stopped':False})
+        self.close.assert_not_called()
+
+    def test_stop_while_daemon_down_does_not_enable_unwatched_youtube(self):
+        self.regular();current=helper.read_lease()
+        with patch.object(helper,'timer_running',return_value=False):
+            helper.stop_session({'service':'youtube','started_at':current['started_at']})
+        self.assertIsNone(helper.read_lease())
+        self.assertEqual(helper.HOSTS.read_text(),self.hosts)
+
+    def test_stop_closure_failure_retains_the_record_for_retry(self):
+        helper.lease('telegram',420);before=socials.USAGE.read_bytes();current=helper.read_lease()
+        with patch.object(helper,'close_matching',side_effect=RuntimeError('cannot close')):
+            with self.assertRaises(RuntimeError):helper.stop_session({'service':'telegram','started_at':current['started_at']})
+        self.assertEqual(helper.read_lease(),current)
+        self.assertEqual(socials.USAGE.read_bytes(),before)
+
+    def test_stop_reads_stdin_before_acquiring_the_daemon_lock(self):
+        events=[]
+        @contextlib.contextmanager
+        def lock():
+            events.append('lock');yield
+        def read(size):
+            events.append('input');return '{"service":"youtube","started_at":1}'
+        import types
+        with patch.object(helper,'locked',lock),patch.object(helper.os,'geteuid',return_value=0),patch.object(sys,'argv',['focus-helper','stop']),patch.object(sys,'stdin',types.SimpleNamespace(read=read)),contextlib.redirect_stdout(io.StringIO()):
+            helper.main()
+        self.assertEqual(events,['input','lock'])
+
     def test_empty_browser_keeps_whitelist_ready_without_relaunch(self):
         helper.guard_cycle()
         self.assertIsNone(helper.read_lease())
@@ -744,6 +808,106 @@ class ClientIntegrationTests(unittest.TestCase):
             url,request=client.youtube_target(None,None,POLICY)
         self.assertEqual(request['video_id'],OTHER)
         prompt.assert_called_once()
+
+    def active_youtube(self):
+        started=client.now_local()
+        import datetime as dt
+        lease={'service':'youtube','started_at':started.timestamp(),'deadline':started.timestamp()+600}
+        state={'services':{'youtube':{'last_opened_at':started.isoformat()}},'history':[{'service':'youtube','url':'https://youtu.be/'+OTHER,'opened_at':started.isoformat(),'access_granted':True,'closed_at':None}],
+               'active_unlock':{'service':'youtube','started_at':started.isoformat(),'ends_at':(started+dt.timedelta(seconds=600)).isoformat(),'url':'https://youtu.be/'+OTHER}}
+        client.save_state(state)
+        return state,lease
+
+    def test_instagram_confirms_then_stops_youtube_before_granting_its_window(self):
+        before,lease=self.active_youtube();events=[]
+        def rpc(command,argument=None,payload=None):
+            events.append(command)
+            if command=='youtube-status':return {'lease':lease,'daily_available':{'instagram':True}}
+            if command=='stop':
+                self.assertEqual(payload,{'service':'youtube','started_at':lease['started_at']});return {'stopped':True}
+            return {}
+        def command(*args):
+            if args[0]=='lease':events.append('grant '+args[1])
+        with patch.object(client,'helper_json',side_effect=rpc),patch.object(client,'helper_command',side_effect=command),patch('builtins.input',return_value='да') as question,contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(client.run_service('instagram'),0)
+        self.assertLess(events.index('stop'),events.index('grant instagram'))
+        self.assertIn('YouTube',question.call_args.args[0])
+        self.open.assert_called_once_with('https://www.instagram.com/','Arc')
+        after=client.load_state()
+        self.assertEqual(after['services']['youtube'],before['services']['youtube'])
+        self.assertEqual(after['history'][0]['closing_reason'],'stopped')
+        self.assertEqual(after['active_unlock']['service'],'instagram')
+
+    def test_declining_switch_keeps_active_video_and_does_not_use_target_day(self):
+        state,lease=self.active_youtube();before=client.STATE_PATH.read_bytes()
+        with patch.object(client,'helper_json',return_value={'lease':lease,'daily_available':{'instagram':True}}) as rpc,patch.object(client,'helper_command') as command,patch('builtins.input',return_value='нет'),contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(client.run_service('instagram'),1)
+        rpc.assert_called_once_with('youtube-status')
+        command.assert_not_called();self.open.assert_not_called()
+        self.assertEqual(client.STATE_PATH.read_bytes(),before)
+
+    def test_target_daily_refusal_does_not_stop_the_current_video(self):
+        state,lease=self.active_youtube()
+        with patch.object(client,'helper_json',return_value={'lease':lease,'daily_available':{'instagram':False}}) as rpc,patch('builtins.input',side_effect=AssertionError('unexpected confirmation')),patch.object(client,'helper_command') as command:
+            with self.assertRaises(client.FocusOpenError):client.run_service('instagram')
+        rpc.assert_called_once_with('youtube-status');command.assert_not_called()
+
+    def test_same_service_does_not_stop_and_reopen_itself(self):
+        state,lease=self.active_youtube();lease['service']='instagram'
+        with patch.object(client,'helper_json',return_value={'lease':lease,'daily_available':{'instagram':False}}) as rpc,patch('builtins.input',side_effect=AssertionError('unexpected confirmation')),patch.object(client,'helper_command') as command,contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(client.run_service('instagram'),1)
+        rpc.assert_called_once_with('youtube-status');command.assert_not_called()
+
+    def test_expiry_during_confirmation_still_allows_target_opening(self):
+        state,lease=self.active_youtube()
+        def rpc(command,argument=None,payload=None):
+            if command=='youtube-status':return {'lease':lease,'daily_available':{'x':True}}
+            return {'stopped':False} if command=='stop' else {}
+        with patch.object(client,'helper_json',side_effect=rpc),patch.object(client,'helper_command'),patch('builtins.input',return_value='да'),contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(client.run_service('x'),0)
+        self.assertEqual(client.load_state()['history'][0]['closing_reason'],'expired')
+
+    def test_stop_failure_does_not_grant_or_reserve_the_target(self):
+        state,lease=self.active_youtube();before=client.STATE_PATH.read_bytes()
+        def rpc(command,argument=None,payload=None):
+            if command=='youtube-status':return {'lease':lease,'daily_available':{'x':True}}
+            raise client.FocusOpenError('stop failed')
+        with patch.object(client,'helper_json',side_effect=rpc),patch.object(client,'helper_command') as command,patch('builtins.input',return_value='да'):
+            with self.assertRaises(client.FocusOpenError):client.run_service('x')
+        command.assert_not_called();self.assertEqual(client.STATE_PATH.read_bytes(),before)
+
+    def test_youtube_stop_requires_no_link_and_no_second_confirmation(self):
+        state,lease=self.active_youtube()
+        with patch.object(client,'helper_json',side_effect=[{'lease':lease},{'stopped':True}]) as rpc,patch('builtins.input',side_effect=AssertionError('unexpected question')),contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(client.main(['youtube','--stop']),0)
+        self.assertEqual(rpc.call_args.args,('stop',))
+        self.assertEqual(client.load_state()['services']['youtube'],state['services']['youtube'])
+
+    def test_youtube_stop_does_not_end_an_unrelated_social_window(self):
+        state,lease=self.active_youtube();lease['service']='telegram'
+        with patch.object(client,'helper_json',return_value={'lease':lease}) as rpc,contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(client.main(['youtube','--stop']),0)
+        rpc.assert_called_once_with('youtube-status')
+
+    def test_telegram_switch_uses_the_same_confirmation_and_seven_minute_limit(self):
+        state,lease=self.active_youtube()
+        def rpc(command,argument=None,payload=None):
+            if command=='youtube-status':return {'lease':lease,'daily_available':{'telegram':True}}
+            return {'stopped':True} if command=='stop' else {}
+        with patch.object(client,'helper_json',side_effect=rpc),patch.object(client,'helper_command') as command,patch('builtins.input',return_value='да'),contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(client.run_telegram(),0)
+        command.assert_any_call('lease','telegram','420')
+
+    def test_eof_or_interrupt_never_approves_session_switch(self):
+        for error in (EOFError(),KeyboardInterrupt()):
+            with patch('builtins.input',side_effect=error):self.assertFalse(client.confirm('stop?'))
+
+    def test_overlap_business_error_does_not_claim_installation_is_missing(self):
+        import types
+        with patch.object(client.subprocess,'run',return_value=types.SimpleNamespace(returncode=1,stderr='Another temporary lease is active')):
+            with self.assertRaises(client.FocusOpenError) as error:client.helper_command('lease','instagram','120')
+        self.assertIn('focus-open stop',str(error.exception))
+        self.assertNotIn('установка',str(error.exception))
 
     def test_course_opens_without_lease_or_cooldown_change(self):
         before={'services':{'youtube':{'last_opened_at':client.now_local().isoformat()}},'history':[]}

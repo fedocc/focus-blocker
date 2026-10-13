@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import copy
+import math
 
 BASE = Path('/Library/PrivilegedHelperTools/focus-open')
 # Only this root-owned installation directory is added in isolated mode.
@@ -156,6 +157,42 @@ def restore():
     for service in SOCIAL_SERVICES:
         set_access(service, False)
     guard_cycle()  # A manual restore cannot expire educational policy.
+
+
+def stop_session(expected):
+    if (not isinstance(expected, dict) or set(expected) != {'service', 'started_at'} or
+            expected['service'] not in TEMPORARY_SERVICES or
+            isinstance(expected['started_at'], bool) or not isinstance(expected['started_at'], (int, float)) or
+            not math.isfinite(expected['started_at']) or expected['started_at'] <= 0):
+        raise ValueError('Invalid session stop token')
+    current = read_lease()
+    if not current:
+        return {'stopped': False}
+    if current['service'] != expected['service'] or current['started_at'] != expected['started_at']:
+        raise RuntimeError('Активная сессия изменилась; она не была остановлена. Повтори команду.')
+    revoke_lease()
+    # Ending never refunds a day or video use. Study access needs a live guard.
+    if timer_running():
+        guard_cycle()
+    else:
+        set_access('youtube', False)
+    return {'stopped': True, 'service': current['service'], 'started_at': current['started_at']}
+
+
+def daily_available():
+    now = time.time()
+    usage = socials.read_usage()
+    result = {}
+    for service, seconds in socials.DURATIONS.items():
+        try:
+            socials.validate(service, seconds, usage, now)
+        except RuntimeError:
+            result[service] = False
+        else:
+            result[service] = True
+    last = youtube.read_usage().get('last_regular_opened_at')
+    result['youtube'] = last is None or socials.day_at(now) > socials.day_at(float(last))
+    return result
 
 
 def timer_running():
@@ -384,15 +421,20 @@ def main():
             duration = int(sys.stdin.read(16))
     if args == ['youtube-duration']:
         duration = int(sys.stdin.read(16))
+    if args == ['stop']:
+        request = json.loads(sys.stdin.read(4096))
     with locked():
         if args == ['check']:
             require_timer()
         elif args == ['restore']:
             restore()
+        elif args == ['stop']:
+            print(json.dumps(stop_session(request), ensure_ascii=False))
         elif args == ['youtube-policy']:
             print(json.dumps(youtube.read_policy(), ensure_ascii=False))
         elif args == ['youtube-status']:
             print(json.dumps({'usage': youtube.read_usage(), 'lease': read_lease(),
+                             'daily_available': daily_available(),
                              'study': youtube.study_scope(youtube.read_policy()),
                              'health': json.loads(youtube.HEALTH.read_text()) if youtube.HEALTH.exists() else None,
                              'last_event': json.loads(youtube.LAST_EVENT.read_text()) if youtube.LAST_EVENT.exists() else None}, ensure_ascii=False))

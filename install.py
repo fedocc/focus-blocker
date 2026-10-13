@@ -111,7 +111,7 @@ def migrate_youtube_usage(state):
 
 def sudoers_text(username):
     helper = str(BASE / 'focus-helper')
-    commands = ('check', 'restore', 'lease youtube', 'lease instagram', 'lease x', 'lease telegram',
+    commands = ('check', 'restore', 'stop', 'lease youtube', 'lease instagram', 'lease x', 'lease telegram',
                 'guard-check', 'youtube-status', 'youtube-policy', 'youtube-duration')
     return username + ' ALL=(root) NOPASSWD: ' + ', '.join(helper + ' ' + c for c in commands) + '\n'
 

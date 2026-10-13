@@ -316,13 +316,7 @@ def run_telegram(set_minutes: int | None = None) -> int:
             print(f"Telegram: {set_minutes} мин. со следующей сессии.")
             return 0
         now = now_local()
-        active = state.get("active_unlock") or {}
-        ends_at = parse_iso_datetime(active.get("ends_at"))
-        if active.get("service") == "telegram" and ends_at and ends_at > now and service_block_status("telegram") == "temporarily unlocked":
-            print("Telegram access is already active.")
-            return 1
-        if telegram_used_today(state, now):
-            print("Telegram access already used today.")
+        if not require_service_slot(state, 'telegram'):
             return 1
         minutes = TELEGRAM_DEFAULT_MINUTES
         helper_command("check")
@@ -404,7 +398,10 @@ def prompt_text(message: str) -> str:
 
 
 def confirm(message: str) -> bool:
-    answer = input(f"{message} [y/N]: ").strip().lower()
+    try:
+        answer = input(f"{message} [да/Нет]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
     return answer in {"y", "yes", "д", "да"}
 
 
@@ -537,6 +534,14 @@ def read_hosts() -> str:
     return HOSTS_PATH.read_text(encoding="utf-8")
 
 
+def helper_failure(detail: str) -> FocusOpenError:
+    if 'Another temporary lease is active' in detail:
+        return FocusOpenError('Ещё идёт другая временная сессия. Подтверди её завершение или выполни focus-open stop.')
+    if not HELPER_PATH.exists() or 'a password is required' in detail or 'not allowed to execute' in detail or 'command not found' in detail:
+        return FocusOpenError('Системный помощник недоступен. Нужна однократная установка Focus Open. ' + detail)
+    return FocusOpenError(detail or 'Не удалось выполнить команду системного помощника.')
+
+
 def helper_command(*args: str) -> None:
     command_args = args[:2] if args and args[0] == "lease" else args
     duration_input = args[2] if args and args[0] == "lease" else ""
@@ -546,10 +551,7 @@ def helper_command(*args: str) -> None:
         text=True, capture_output=True, timeout=30, check=False,
     )
     if result.returncode:
-        raise FocusOpenError(
-            "Системный помощник недоступен. Нужна однократная установка Focus Open. "
-            + result.stderr.strip()
-        )
+        raise helper_failure(result.stderr.strip())
 
 
 def helper_json(command: str, argument: str | None = None, payload: Any = None) -> dict[str, Any]:
@@ -559,11 +561,62 @@ def helper_json(command: str, argument: str | None = None, payload: Any = None) 
     result = subprocess.run(args, input=json.dumps(payload) if payload is not None else "",
                             text=True, capture_output=True, timeout=30, check=False)
     if result.returncode:
-        raise FocusOpenError(result.stderr.strip() or "Системный контроль YouTube недоступен.")
+        raise helper_failure(result.stderr.strip())
     try:
         return json.loads(result.stdout) if result.stdout.strip() else {}
     except json.JSONDecodeError as exc:
         raise FocusOpenError("Системный помощник вернул некорректный ответ.") from exc
+
+
+def record_session_end(state: dict[str, Any], lease: dict[str, Any], stopped: bool) -> None:
+    active = state.get('active_unlock') or {}
+    if active.get('service') == lease['service']:
+        state.pop('active_unlock', None)
+    for entry in reversed(state.get('history', [])):
+        opened = parse_iso_datetime(entry.get('opened_at'))
+        if entry.get('service') == lease['service'] and opened and abs(opened.timestamp() - lease['started_at']) < 5:
+            if not entry.get('closed_at'):
+                entry['closed_at'] = now_local().isoformat()
+                entry['closing_reason'] = 'stopped' if stopped else 'expired'
+            break
+    save_state(state)
+
+
+def require_service_slot(state: dict[str, Any], target: str, root_status: dict[str, Any] | None = None) -> bool:
+    status = root_status if root_status is not None else helper_json('youtube-status')
+    lease = status.get('lease')
+    if lease and lease['service'] == target:
+        print(SERVICES[target].display_name + ' уже открыт. Завершить сессию: focus-open stop')
+        return False
+    available = status.get('daily_available', {})
+    if target in available:
+        if not available[target]:
+            raise FocusOpenError(SERVICES[target].display_name + ' уже открывался сегодня. Следующий доступ — после полуночи по Москве.')
+    else:
+        ensure_cooldown_allows(state, target, now_local())
+    if not lease:
+        return True
+    name = SERVICES[lease['service']].display_name
+    question = f'Сейчас идёт сессия {name}. Завершить её и открыть {SERVICES[target].display_name}?'
+    if not confirm(question):
+        print('Текущая сессия продолжается.')
+        return False
+    result = helper_json('stop', payload={'service': lease['service'], 'started_at': lease['started_at']})
+    record_session_end(state, lease, bool(result.get('stopped')))
+    return True
+
+
+def stop_command(service: str | None = None) -> int:
+    with exclusive_lock():
+        state = load_state()
+        lease = helper_json('youtube-status').get('lease')
+        if not lease or service is not None and lease['service'] != service:
+            print('Активной временной сессии' + (' ' + SERVICES[service].display_name if service else '') + ' нет.')
+            return 0
+        result = helper_json('stop', payload={'service': lease['service'], 'started_at': lease['started_at']})
+        record_session_end(state, lease, bool(result.get('stopped')))
+        print('Сессия ' + SERVICES[lease['service']].display_name + ' завершена.')
+    return 0
 
 
 def update_hosts_for_service(service_key: str, unlock: bool, seconds: int = 60) -> None:
@@ -944,8 +997,10 @@ def run_youtube(raw_url: str | None = None, course: str | None = None,
             print("Лекции из белого списка доступны постоянно, без таймера.")
             return 0
         root_status = helper_json("youtube-status")
-        if root_status.get("lease"):
-            raise FocusOpenError("Уже идёт временная сессия. Дождись её завершения.")
+        if int(root_status.get('usage', {}).get('counts', {}).get(request.get('video_id'), 0)) >= 2:
+            raise FocusOpenError('Эта ссылка уже использована 2 раза. Повторный доступ закрыт.')
+        if not require_service_slot(state, 'youtube', root_status):
+            return 1
         helper_json("guard-check")
         prepare_youtube_browser()
         previous = json.loads(json.dumps(state))
@@ -1004,7 +1059,8 @@ def run_service(
     with exclusive_lock():
         state = load_state()
         current_time = now_local()
-        ensure_cooldown_allows(state, service_key, current_time)
+        if not require_service_slot(state, service_key):
+            return 1
         helper_command("check")
         helper_json("guard-check")
         # No browser restart: the daemon expires this window and closes only
@@ -1133,9 +1189,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     telegram_parser = subparsers.add_parser("telegram")
     telegram_parser.add_argument("--set-minutes", type=int, metavar="MINUTES")
+    telegram_parser.add_argument('--stop', action='store_true')
     youtube_parser = subparsers.add_parser("youtube")
     youtube_parser.add_argument("--course", metavar="COURSE")
     youtube_parser.add_argument("--courses", action="store_true")
+    youtube_parser.add_argument('--stop', action='store_true')
     youtube_parser.add_argument("--browser-app", default=DEFAULT_BROWSER_APP)
     youtube_parser.add_argument("--no-browser-guard", action="store_true")
     youtube_parser.add_argument("--no-browser-reopen", action="store_true")
@@ -1147,6 +1205,7 @@ def build_parser() -> argparse.ArgumentParser:
         social_parser.add_argument("--no-browser-guard", action="store_true")
         social_parser.add_argument("--no-browser-reopen", action="store_true")
         social_parser.add_argument("--url-monitor", action="store_true")
+        social_parser.add_argument('--stop', action='store_true')
 
     open_parser = subparsers.add_parser("open")
     open_parser.add_argument("--service", required=True, choices=sorted(BROWSER_GUARD_SERVICES))
@@ -1159,6 +1218,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("status")
     subparsers.add_parser("doctor")
     subparsers.add_parser("restore")
+    subparsers.add_parser('stop')
     subparsers.add_parser("install-zsh")
     subparsers.add_parser("self-test")
     return parser
@@ -1168,6 +1228,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == 'stop':
+            return stop_command()
+        if args.command in ('youtube', 'instagram', 'x', 'telegram') and args.stop:
+            return stop_command(args.command)
         if args.command == "telegram":
             return run_telegram(args.set_minutes)
         if args.command == "youtube":
