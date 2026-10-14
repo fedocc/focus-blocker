@@ -4,12 +4,29 @@ import contextlib
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import focus_open
 
 
 class FocusOpenPureFunctionTests(unittest.TestCase):
+    def test_instagram_and_x_open_in_observed_arc_tabs_instead_of_external_preview(self):
+        for url in (focus_open.INSTAGRAM_URL,focus_open.X_URL):
+            with self.subTest(url=url),patch.object(focus_open.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout='OK',stderr='')) as run:
+                focus_open.open_url(url,'Arc')
+                command=run.call_args.args[0]
+                self.assertEqual(command[:2],['/usr/bin/osascript','-e'])
+                self.assertIn('tell front window to make new tab with properties {URL:',command[2])
+                self.assertIn('select t',command[2])
+
+    def test_failed_observed_instagram_open_never_falls_back_to_hidden_external_view(self):
+        with patch.object(focus_open.subprocess,'run',return_value=SimpleNamespace(returncode=1,stdout='',stderr='No main window')) as run:
+            with self.assertRaisesRegex(focus_open.FocusOpenError,'No main window'):
+                focus_open.open_url(focus_open.INSTAGRAM_URL,'Arc')
+        self.assertEqual(run.call_count,1)
+        self.assertEqual(run.call_args.args[0][0],'/usr/bin/osascript')
+
     def test_youtube_allows_watch_and_shortlink(self):
         self.assertTrue(focus_open.validate_url("youtube", "https://www.youtube.com/watch?v=abc123").allowed)
         self.assertTrue(focus_open.validate_url("youtube", "https://youtu.be/abc123").allowed)

@@ -769,7 +769,8 @@ def open_app(app_name: str) -> None:
 
 
 def open_url(url: str, browser_app: str | None = None) -> None:
-    if browser_app == DEFAULT_BROWSER_APP and (urlparse(url).hostname or "") in SERVICES["youtube"].allowed_domains:
+    controlled_domains = {host for service in BROWSER_GUARD_SERVICES for host in SERVICES[service].allowed_domains}
+    if browser_app == DEFAULT_BROWSER_APP and (urlparse(url).hostname or "") in controlled_domains:
         if urlparse(url).path == "/playlist":
             playlist_ids = parse_qs(urlparse(url).query).get("list", [])
             for item in youtube_policy()["playlists"]:
@@ -801,7 +802,7 @@ def open_url(url: str, browser_app: str | None = None) -> None:
             'exit repeat',
             'end if',
             'end repeat',
-            'if not didOpen then error "Не удалось открыть контролируемую вкладку YouTube"',
+            'if not didOpen then error "Не удалось открыть контролируемую вкладку Arc"',
             'return "OK"',
             'end tell',
         ])

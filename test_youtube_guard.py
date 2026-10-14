@@ -481,6 +481,20 @@ class RootIntegrationTests(unittest.TestCase):
         helper.restore()
         with self.assertRaisesRegex(RuntimeError,'Instagram уже открывался'):helper.lease('instagram',120)
 
+    def test_instagram_expiry_closes_cached_page_and_keeps_lecture_and_other_browser(self):
+        helper.lease('instagram',120)
+        before=socials.USAGE.read_bytes()
+        instagram='https://www.instagram.com/reels/'
+        lecture='https://youtu.be/'+VIDEO
+        self.report.side_effect=[self.tabs(lecture,instagram)+self.tabs(name='Google Chrome'),self.tabs(lecture)]
+        value=helper.read_lease();value['deadline']=time.time()-1;guard.atomic_json(helper.STATE,value)
+        helper.expire()
+        self.assertIsNone(helper.read_lease())
+        self.assertEqual([t['url'] for t in self.close.call_args.args[0]],[instagram])
+        self.assertEqual(socials.USAGE.read_bytes(),before)
+        self.assertNotIn(helper.PREFIX+'127.0.0.1 instagram.test',helper.HOSTS.read_text())
+        self.force.assert_not_called()
+
     def test_missing_protected_social_usage_fails_closed(self):
         socials.USAGE.unlink()
         with self.assertRaises(FileNotFoundError):helper.lease('telegram',420)
