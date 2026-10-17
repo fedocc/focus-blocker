@@ -110,6 +110,54 @@ class PolicyTests(unittest.TestCase):
                 guard.make_scope(request, POLICY, {}, 1000)
 
 
+class TemporaryFullYouTubeTests(unittest.TestCase):
+    def setUp(self):
+        self.scope={'mode':'video','allowed_ids':[], 'temporary_full_access':{
+            'seconds':2100,'started_at':1000,'deadline':3100,
+            'started_monotonic':5000,'deadline_monotonic':7100}}
+        self.stack=contextlib.ExitStack();self.addCleanup(self.stack.close)
+        self.wall=self.stack.enter_context(patch.object(guard.time,'time',return_value=1100))
+        self.mono=self.stack.enter_context(patch.object(guard.time,'clock_gettime',return_value=5100))
+
+    def test_root_window_allows_direct_youtube_browsing_and_any_video(self):
+        for url in ('https://www.youtube.com/','https://www.youtube.com/watch?v='+OTHER,
+                    'https://www.youtube.com/shorts/'+ANOTHER,'https://music.youtube.com/'):
+            self.assertTrue(guard.url_allowed(self.scope,url),url)
+
+    def test_window_does_not_allow_previews_other_hosts_or_unsafe_urls(self):
+        for url in ('https://www.google.com/search?udm=vids#fpstate=ive&vld=vid:'+OTHER,
+                    'https://youtube.com.evil.test/','https://instagram.com/',
+                    'file://youtube.com/','https://user@youtube.com/','https://youtube.com:444/'):
+            self.assertFalse(guard.url_allowed(self.scope,url),url)
+
+    def test_either_clock_expiry_closes_the_window(self):
+        self.wall.return_value=3100
+        self.assertFalse(guard.url_allowed(self.scope,'https://youtube.com/'))
+        self.wall.return_value=1100;self.mono.return_value=7100
+        self.assertFalse(guard.url_allowed(self.scope,'https://youtube.com/'))
+
+    def test_backwards_clocks_cannot_reactivate_a_window(self):
+        self.wall.return_value=999
+        self.assertFalse(guard.temporary_full_access_active(self.scope))
+        self.wall.return_value=1100;self.mono.return_value=4999
+        self.assertFalse(guard.temporary_full_access_active(self.scope))
+
+    def test_malformed_or_unbounded_metadata_is_rejected(self):
+        for key,value in (('seconds',True),('seconds',21601),('deadline',float('nan')),
+                          ('deadline',999999),('started_monotonic','5000')):
+            scope=copy.deepcopy(self.scope);scope['temporary_full_access'][key]=value
+            self.assertFalse(guard.temporary_full_access_active(scope))
+        scope=copy.deepcopy(self.scope);scope['mode']='playlist'
+        self.assertFalse(guard.temporary_full_access_active(scope))
+
+    def test_ordinary_cli_request_cannot_supply_root_window_metadata(self):
+        request={'video_id':OTHER,'seconds':2100,'temporary_full_access':self.scope['temporary_full_access']}
+        scope=guard.make_scope(request,POLICY,{},1100)
+        self.assertNotIn('temporary_full_access',scope)
+        self.assertFalse(guard.url_allowed(scope,'https://www.youtube.com/'))
+        self.assertFalse(guard.url_allowed(scope,'https://youtu.be/'+ANOTHER))
+
+
 class DailyPolicyTests(unittest.TestCase):
     def test_all_social_services_use_one_moscow_day_and_exact_durations(self):
         import datetime as dt
@@ -337,6 +385,27 @@ class RootIntegrationTests(unittest.TestCase):
     def regular(self):
         scope=guard.make_scope({'video_id':OTHER,'seconds':120}, POLICY,{},time.time())
         helper.lease('youtube',120,scope)
+
+    def test_full_window_expiry_closes_browsing_and_keeps_lectures_and_quota(self):
+        scope=dict(guard.study_scope(POLICY),mode='video',allowed_ids=[],study_ids=guard.study_scope(POLICY)['allowed_ids'],seconds=2100)
+        current=helper.lease('youtube',2100,scope)
+        current['youtube_scope']['temporary_full_access']={k:current[k] for k in ('started_at','deadline','started_monotonic','deadline_monotonic')}
+        current['youtube_scope']['temporary_full_access']['seconds']=2100
+        guard.atomic_json(helper.STATE,current)
+        usage={'last_regular_opened_at':current['started_at'],'counts':{OTHER:1}}
+        guard.atomic_json(guard.USAGE,usage)
+        lecture='https://youtu.be/'+VIDEO
+        browsing=self.tabs('https://www.youtube.com/','https://youtu.be/'+ANOTHER,lecture)
+        self.report.return_value=browsing
+        self.assertTrue(helper.guard_cycle())
+        self.close.assert_not_called()
+        self.report.side_effect=[browsing,self.tabs(lecture),self.tabs(lecture)]
+        current=helper.read_lease();current['deadline']=time.time()-1;guard.atomic_json(helper.STATE,current)
+        helper.expire();helper.guard_cycle()
+        self.assertIsNone(helper.read_lease())
+        self.assertEqual({t['url'] for t in self.close.call_args.args[0]}, {'https://www.youtube.com/','https://youtu.be/'+ANOTHER})
+        self.assertEqual(guard.read_usage(),usage)
+        self.force.assert_not_called()
 
     def test_permanent_lectures_have_no_deadline_and_no_lease(self):
         self.report.return_value=self.tabs('https://youtu.be/'+VIDEO)

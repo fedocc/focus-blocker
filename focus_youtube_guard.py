@@ -1,5 +1,6 @@
 """Root-owned YouTube policy and browser observer; no browser extension required."""
 import json
+import math
 import os
 import pwd
 import re
@@ -199,6 +200,27 @@ def is_youtube_url(value):
     return any(host == domain or host.endswith('.' + domain) for domain in ('youtube.com', 'youtu.be', 'youtube-nocookie.com'))
 
 
+def temporary_full_access_active(scope):
+    # Only an administrator may place this window in the protected lease.
+    # make_scope never copies it from an ordinary terminal request.
+    window = scope.get('temporary_full_access')
+    fields = ('started_at', 'deadline', 'started_monotonic', 'deadline_monotonic')
+    if scope.get('mode') != 'video' or not isinstance(window, dict):
+        return False
+    seconds = window.get('seconds')
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= COOLDOWN:
+        return False
+    if any(isinstance(window.get(k), bool) or not isinstance(window.get(k), (int, float)) or
+           not math.isfinite(window[k]) for k in fields):
+        return False
+    if (abs(window['deadline'] - window['started_at'] - seconds) > .01 or
+            abs(window['deadline_monotonic'] - window['started_monotonic'] - seconds) > .01):
+        return False
+    now, mono = time.time(), time.clock_gettime(time.CLOCK_MONOTONIC)
+    return (window['started_at'] <= now < window['deadline'] and
+            window['started_monotonic'] <= mono < window['deadline_monotonic'])
+
+
 def url_allowed(scope, value):
     parsed = urlparse(value)
     host = (parsed.hostname or '').lower().rstrip('.')
@@ -206,6 +228,8 @@ def url_allowed(scope, value):
         return False
     if parsed.scheme not in ('http', 'https') or parsed.username or parsed.password or parsed.port:
         return False
+    if is_youtube_url(value) and temporary_full_access_active(scope):
+        return True
     params = parse_qs(parsed.query)
     if host in ('youtube.com', 'www.youtube.com', 'm.youtube.com'):
         path = parsed.path.rstrip('/')
