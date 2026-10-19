@@ -1,6 +1,7 @@
 """Study dashboard: separate from Anki reviews and their scheduling."""
 import json
 import time
+import sys
 from pathlib import Path
 
 from aqt import mw, gui_hooks
@@ -83,6 +84,69 @@ class Notice(QLabel):
         self.setVisible(bool(text))
 
 
+class MenuTimer:
+    """Text-only macOS status item; display preferences never control a block.
+
+    All AppKit calls run on Qt's main thread. Each objc_msgSend signature has
+    its own callable, so setting argument types cannot race another bridge.
+    """
+    def __init__(self, dock):
+        import ctypes as c
+        self.c = c
+        self.objc = c.CDLL('/usr/lib/libobjc.A.dylib')
+        self.objc.objc_getClass.argtypes = [c.c_char_p]
+        self.objc.objc_getClass.restype = c.c_void_p
+        self.objc.sel_registerName.argtypes = [c.c_char_p]
+        self.objc.sel_registerName.restype = c.c_void_p
+        self.address = c.cast(self.objc.objc_msgSend, c.c_void_p).value
+        self.dock = dock
+        self.bar = self.send(self.objc.objc_getClass(b'NSStatusBar'), 'systemStatusBar')
+        self.item = self.send(self.bar, 'statusItemWithLength:', [-1.0], [c.c_double])
+        # AppKit returns an autoreleased item and NSStatusBar does not own it.
+        # Keep it alive across Qt event-loop autorelease-pool drains.
+        self.item = self.send(self.item, 'retain')
+        self.button = self.send(self.item, 'button')
+        font = self.send(self.objc.objc_getClass(b'NSFont'), 'monospacedDigitSystemFontOfSize:weight:', [12.0, 0.0], [c.c_double, c.c_double])
+        self.send(self.button, 'setFont:', [font], [c.c_void_p], None)
+        self.timer = QTimer(dock)
+        self.timer.timeout.connect(self.tick)
+        self.timer.start(1000)
+        self.seen_at = time.monotonic()
+        self.tick()
+
+    def send(self, receiver, selector, args=(), types=(), result='pointer'):
+        c = self.c
+        output = c.c_void_p if result == 'pointer' else result
+        call = c.CFUNCTYPE(output, c.c_void_p, c.c_void_p, *types)(self.address)
+        return call(receiver, self.objc.sel_registerName(selector.encode()), *args)
+
+    def string(self, text):
+        return self.send(self.objc.objc_getClass(b'NSString'), 'stringWithUTF8String:', [text.encode()], [self.c.c_char_p])
+
+    def tick(self):
+        state = self.dock.state
+        session = (state or {}).get('session')
+        text = 'Фокус · готов'
+        tip = 'Учебные блоки · Anki'
+        if session:
+            remaining = max(0, int(session['remaining'] - (time.monotonic() - self.seen_at)))
+            prefix = '◉' if session['phase'] == 'focus' else '☕'
+            text = f'{prefix} {remaining // 60:02}:{remaining % 60:02}'
+            tip = session['task']['title']
+        elif not state:
+            text = 'Фокус · …'
+        self.send(self.button, 'setTitle:', [self.string(text)], [self.c.c_void_p], None)
+        self.send(self.button, 'setToolTip:', [self.string(tip)], [self.c.c_void_p], None)
+
+    def set_visible(self, visible):
+        self.send(self.item, 'setVisible:', [bool(visible)], [self.c.c_bool], None)
+
+    def close(self):
+        self.timer.stop()
+        self.send(self.bar, 'removeStatusItem:', [self.item], [self.c.c_void_p], None)
+        self.send(self.item, 'release', result=None)
+
+
 class StudyDock(QDockWidget):
     def __init__(self):
         super().__init__('Учебные блоки', mw)
@@ -151,7 +215,7 @@ class StudyDock(QDockWidget):
         day_row.addWidget(self.day_count)
         layout.addLayout(day_row)
         self.day_progress = QProgressBar()
-        self.day_progress.setRange(0, 6)
+        self.day_progress.setRange(0, 5)
         self.day_progress.setTextVisible(False)
         self.day_progress.setFixedHeight(6)
         layout.addWidget(self.day_progress)
@@ -287,7 +351,9 @@ class StudyDock(QDockWidget):
                 self.message.setText(str(error))
                 result = None
             callback(result)
-        mw.taskman.run_in_background(function, done)
+        # Helper/network I/O never touches the collection. Using Anki's default
+        # collection executor here makes every review wait for the status poll.
+        mw.taskman.run_in_background(function, done, uses_collection=False)
 
     def poll(self):
         if self.busy or self.polling:
@@ -301,6 +367,11 @@ class StudyDock(QDockWidget):
                 self.start.setEnabled(False)
                 return
             self.state = value
+            status_item = getattr(self, 'menu_timer', None)
+            if status_item:
+                status_item.seen_at = time.monotonic()
+                status_item.tick()
+            update_home_widget()
             session = value['session']
             phase = session['phase'] if session else 'idle'
             locked = bool(session)
@@ -477,7 +548,34 @@ def loaded():
     action.triggered.connect(show_study)
     mw.form.menuTools.addAction(action)
     mw._slovo_study_action = action
+    archive = QAction('Архивировать текущие колоды…', mw)
+    archive.triggered.connect(archive_decks)
+    mw.form.menuTools.addAction(archive)
+    mw._slovo_archive_action = archive
+    restore = QAction('Вернуть колоды из архива…', mw)
+    restore.triggered.connect(restore_decks)
+    mw.form.menuTools.addAction(restore)
+    mw._slovo_restore_action = restore
     show_study()
+    if sys.platform == 'darwin':
+        dock = mw._slovo_study_dock
+        try:
+            dock.menu_timer = MenuTimer(dock)
+            visible = dock.preferences.get('menu_timer_visible', True)
+            dock.menu_timer.set_visible(visible)
+            menu_timer = QAction('Таймер в строке меню macOS', mw)
+            menu_timer.setCheckable(True)
+            menu_timer.setChecked(visible)
+            def toggle(checked):
+                dock.menu_timer.set_visible(checked)
+                dock.preferences['menu_timer_visible'] = checked
+                bridge.save_preferences(PREFS, dock.preferences)
+            menu_timer.toggled.connect(toggle)
+            mw.form.menuTools.addAction(menu_timer)
+            mw._slovo_menu_timer_action = menu_timer
+        except Exception as error:
+            dock.message.setText('Таймер в строке меню недоступен: ' + str(error))
+
 
 
 gui_hooks.profile_did_open.append(loaded)
@@ -488,6 +586,8 @@ def unloaded():
     if dock:
         dock.closed = True
         dock.poller.stop()
+        if getattr(dock, 'menu_timer', None):
+            dock.menu_timer.close()
         mw.removeDockWidget(dock)
         dock.hide()
         dock.deleteLater()
@@ -497,6 +597,133 @@ def unloaded():
         mw.form.menuTools.removeAction(action)
         action.deleteLater()
         mw._slovo_study_action = None
+    for name in ('_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action'):
+        extra = getattr(mw, name, None)
+        if extra:
+            mw.form.menuTools.removeAction(extra)
+            extra.deleteLater()
+            setattr(mw, name, None)
 
 
 gui_hooks.profile_will_close.append(unloaded)
+
+
+HOME_SCRIPT = r'''
+(() => {
+ const host = document.querySelector('.sidebar-expanded-content');
+ if (!host) return;
+ let el = document.getElementById('slovo-home-focus');
+ if (!el) {
+  el = document.createElement('section'); el.id = 'slovo-home-focus';
+  el.innerHTML = `<style>
+   #slovo-home-focus {order:1000;margin:22px 10px 18px;margin-top:auto;padding:20px;border:1px solid #59717a70;border-radius:20px;
+    background:linear-gradient(135deg,#183747e8,#102833eb);color:#dce9eb;box-shadow:0 12px 36px #06192322;text-align:left;box-sizing:border-box}
+   #slovo-home-focus .sf-top {display:flex;justify-content:space-between;color:#b9cdd0;font-size:10px;letter-spacing:1.5px}
+   #slovo-home-focus .sf-time {font-size:52px;font-weight:600;letter-spacing:-2px;color:#efd09b;line-height:1.3;font-variant-numeric:tabular-nums}
+   #slovo-home-focus .sf-task {font-size:12px;line-height:1.5;overflow-wrap:anywhere;margin:2px 0 12px}
+   #slovo-home-focus .sf-track {height:4px;background:#35505b;border-radius:4px;overflow:hidden;margin:12px 0}
+   #slovo-home-focus .sf-fill {height:100%;background:#d9ba82;width:0%;transition:width .4s}
+   #slovo-home-focus .sf-sub {font-size:10px;color:#9ab5be;line-height:1.5}
+   #slovo-home-focus button {box-sizing:border-box;border:0;border-radius:10px;background:#e3bd7e;color:#132a35;padding:10px 12px;width:100%;font:inherit;font-size:12px;font-weight:600;margin-top:14px;cursor:pointer}
+   #slovo-archive-link {order:999;margin:10px 20px;font-size:11px;color:inherit;opacity:.65;cursor:pointer;background:transparent;border:0;text-align:left}
+  </style><div class="sf-top"><span class="sf-phase">ФОКУС</span><span class="sf-count">0 / 5</span></div>
+  <div class="sf-time">80:00</div><div class="sf-task">Один блок — одна задача</div>
+  <div class="sf-track"><div class="sf-fill"></div></div>
+  <div class="sf-sub">80 мин учёбы · отдых 10 / 30 мин</div>
+  <button type="button">Настроить блок →</button>`;
+  el.querySelector('button').onclick = () => pycmd('slovo:open');
+  host.appendChild(el);
+  const timer = setInterval(() => {
+   if (!el.isConnected) {clearInterval(timer);return;}
+   const s = el._snapshot; if (!s) return;
+   const sec = Math.max(0,Math.ceil(s.remaining-(s.active?(performance.now()-s.at)/1000:0)));
+   el.querySelector('.sf-time').textContent = String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0');
+  },250);
+ }
+ const s = PAYLOAD;
+ el._snapshot = {...s,at:performance.now()};
+ el.querySelector('.sf-phase').textContent = s.phase;
+ el.querySelector('.sf-count').textContent = s.count+' / 5';
+ el.querySelector('.sf-task').textContent = s.title;
+ el.querySelector('.sf-fill').style.width = Math.min(s.count/5*100,100)+'%';
+ el.querySelector('.sf-sub').textContent = s.subtitle;
+ el.querySelector('button').textContent = s.active ? 'Открыть управление →' : 'Настроить блок →';
+ // Hide only the explicitly archived root. Newly created decks stay visible.
+ const archive = s.archive;
+ if(archive) {
+  document.querySelectorAll('tr[data-did="'+archive+'"], tr[id="'+archive+'"]').forEach(row=>row.style.display='none');
+  if(!document.getElementById('slovo-archive-link')) {
+   const link=document.createElement('button');link.id='slovo-archive-link';
+   link.textContent='Архив старых колод ↗';link.onclick=()=>pycmd('slovo:archive');
+   el.before(link);
+  }
+ }
+})();
+'''
+
+
+def update_home_widget(*_):
+    if not mw.col or mw.state != 'deckBrowser':
+        return
+    dock = getattr(mw, '_slovo_study_dock', None)
+    state = dock.state if dock else None
+    session = (state or {}).get('session')
+    phase = (session or {}).get('phase', 'idle')
+    payload = {
+        'phase': {'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА'}[phase],
+        'remaining': (session or {}).get('remaining', 4800), 'active': bool(session),
+        'count': (state or {}).get('completed_today', 0),
+        'title': (session or {}).get('task', {}).get('title', 'Один блок — одна задача'),
+        'subtitle': ('80 мин учёбы · отдых 10 / 30 мин' if state else 'Проверяем системный таймер…'),
+        'archive': str((mw.col.get_config('slovo_archive') or {}).get('deck_id', '')),
+    }
+    mw.deckBrowser.web.eval(HOME_SCRIPT.replace('PAYLOAD', json.dumps(payload, ensure_ascii=False)))
+
+
+def home_message(handled, message, context):
+    if handled[0] or context is not mw.deckBrowser:
+        return handled
+    if message == 'slovo:open':
+        show_study()
+        return True, None
+    if message == 'slovo:archive':
+        from aqt import dialogs
+        browser = dialogs.open('Browser', mw)
+        name = (mw.col.get_config('slovo_archive') or {}).get('name', '')
+        browser.form.searchEdit.lineEdit().setText('deck:' + json.dumps(name, ensure_ascii=False))
+        browser.onSearchActivated()
+        return True, None
+    return handled
+
+
+def archive_decks():
+    """Explicit, reversible archive. Keep cards, deck IDs and review history."""
+    from aqt.operations import QueryOp
+    from aqt.utils import showInfo
+    if mw.col.get_config('slovo_archive'):
+        showInfo('Архив уже создан. Старые карточки доступны через Обзор и меню «Вернуть колоды из архива».')
+        return
+    if mw.state == 'review':
+        mw.moveToState('deckBrowser')
+    def work(col):
+        return bridge.archive_collection(col, PREFS.parent / 'backups')
+    def done(count):
+        mw.reset()
+        showInfo(f'Старые колоды скрыты, {count} карточек исключены из повторений.\nКарточки и история сохранены. Восстановление: Инструменты → Вернуть колоды из архива.')
+    QueryOp(parent=mw, op=work, success=done).with_progress('Архивируем колоды…').run_in_background()
+
+
+def restore_decks():
+    from aqt.operations import QueryOp
+    from aqt.utils import showInfo
+    archive = mw.col.get_config('slovo_archive')
+    if not archive:
+        showInfo('Архивированных колод нет.')
+        return
+    def work(col):
+        bridge.restore_collection(col)
+    QueryOp(parent=mw, op=work, success=lambda _: mw.reset()).with_progress('Возвращаем колоды…').run_in_background()
+
+
+gui_hooks.deck_browser_did_render.append(update_home_widget)
+gui_hooks.webview_did_receive_js_message.append(home_message)

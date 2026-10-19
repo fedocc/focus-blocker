@@ -15,6 +15,50 @@ HELPER = '/Library/PrivilegedHelperTools/focus-open/focus-helper'
 COMMANDS = {'study-status', 'study-start', 'study-emergency-request', 'study-emergency-confirm'}
 
 
+def archive_collection(col, backup):
+    if col.get_config('slovo_archive'):
+        raise ValueError('Архив уже существует')
+    backup.mkdir(mode=0o700, parents=True, exist_ok=True)
+    col.create_backup(backup_folder=str(backup), force=True, wait_for_completion=True)
+    roots = [{'id': int(d.id), 'name': d.name} for d in col.decks.all_names_and_ids()
+             if '::' not in d.name and (d.id != 1 or col.db.scalar('select count() from cards where did=1'))]
+    cards = list(col.find_cards('-is:suspended'))
+    today = dt.datetime.now(dt.timezone(dt.timedelta(hours=3)))
+    name = 'Архив · ' + today.strftime('%d.%m.%Y')
+    if col.decks.by_name(name):
+        raise ValueError('Колода с именем архива уже существует')
+    entry = {'roots': roots, 'unsuspend_ids': cards, 'name': name, 'created': today.isoformat(), 'complete': False}
+    col.set_config('slovo_archive', entry)
+    if cards:
+        col.sched.suspend_cards(cards)
+    for deck in roots:
+        col.decks.rename(deck['id'], name + '::' + deck['name'])
+    archive_id = col.decks.id(name)
+    deck = col.decks.get(archive_id)
+    deck['collapsed'] = True
+    col.decks.update(deck)
+    entry.update(deck_id=int(archive_id), complete=True)
+    col.set_config('slovo_archive', entry)
+    return len(cards)
+
+
+def restore_collection(col):
+    archive = col.get_config('slovo_archive')
+    if not archive:
+        return
+    for deck in archive['roots']:
+        existing = col.decks.by_name(deck['name'])
+        if existing and int(existing['id']) != deck['id']:
+            raise ValueError('Уже есть новая колода «' + deck['name'] + '». Переименуй её перед восстановлением архива.')
+    for deck in archive['roots']:
+        col.decks.rename(deck['id'], deck['name'])
+    live = set(col.find_cards('is:suspended'))
+    ids = [i for i in archive['unsuspend_ids'] if i in live]
+    if ids:
+        col.sched.unsuspend_cards(ids)
+    col.remove_config('slovo_archive')
+
+
 def helper(command, payload=None):
     if command not in COMMANDS:
         raise ValueError('Unsupported study command')
