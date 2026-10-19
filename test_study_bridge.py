@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import plistlib
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -9,6 +10,19 @@ from anki_study import bridge
 
 
 class BridgeTests(unittest.TestCase):
+    def test_one_broken_application_does_not_break_the_app_picker(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for name, value in (('Valid', {'CFBundleIdentifier': 'com.example.Editor', 'CFBundleName': 'Editor'}),
+                                ('InvalidXML', b'<?xml version="1.0"?><plist><dict>\x00</dict></plist>'),
+                                ('ArrayRoot', []),
+                                ('InvalidID', {'CFBundleIdentifier': ['not', 'a', 'string']}),
+                                ('MissingID', {})):
+                contents = root / (name + '.app') / 'Contents'
+                contents.mkdir(parents=True)
+                (contents / 'Info.plist').write_bytes(value if isinstance(value, bytes) else plistlib.dumps(value))
+            self.assertEqual(bridge.applications([root]), [('com.example.Editor', 'Editor')])
+
     def test_transport_has_fixed_executable_and_no_user_command_interpolation(self):
         payload = {'task': {'title': '$(rm -rf /) `echo x`'}, 'apps': []}
         with patch.object(bridge.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='{}')) as run:

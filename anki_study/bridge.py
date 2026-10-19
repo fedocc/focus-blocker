@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 import urllib.request
+from xml.parsers.expat import ExpatError
 
 ORIGIN = 'https://slovo.45-80-228-215.sslip.io'
 HELPER = '/Library/PrivilegedHelperTools/focus-open/focus-helper'
@@ -54,19 +55,27 @@ def plan(token, date=None):
     return value
 
 
-def applications():
+def applications(roots=None):
     found = {}
-    roots = [Path('/Applications'), Path('/System/Applications'), Path.home() / 'Applications']
+    if roots is None:
+        roots = [Path('/Applications'), Path('/System/Applications'), Path.home() / 'Applications']
     for root in roots:
-        paths = list(root.glob('*.app')) + list(root.glob('*/*.app'))
+        try:
+            paths = list(root.glob('*.app')) + list(root.glob('*/*.app'))
+        except OSError:
+            continue
         for path in paths:
             try:
                 with (path / 'Contents/Info.plist').open('rb') as stream:
                     info = plistlib.load(stream)
+                if not isinstance(info, dict):
+                    continue
                 bundle = info.get('CFBundleIdentifier')
-                if bundle:
-                    found[bundle] = str(info.get('CFBundleDisplayName') or info.get('CFBundleName') or path.stem)
-            except (OSError, ValueError, plistlib.InvalidFileException):
+                if not isinstance(bundle, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{2,199}', bundle):
+                    continue
+                name = info.get('CFBundleDisplayName') or info.get('CFBundleName')
+                found[bundle] = name if isinstance(name, str) and name.strip() else path.stem
+            except (OSError, ValueError, plistlib.InvalidFileException, ExpatError):
                 continue
     return sorted(found.items(), key=lambda entry: entry[1].casefold())
 
