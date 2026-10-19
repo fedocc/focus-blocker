@@ -22,7 +22,8 @@ BASE = Path('/Library/PrivilegedHelperTools/focus-open')
 PLIST = Path('/Library/LaunchDaemons/local.focus-open.timer.plist')
 RULE = Path('/private/etc/sudoers.d/focus-open')
 HOSTS = Path('/private/etc/hosts')
-ROOT_FILES = ('focus-helper', 'focus_youtube_guard.py', 'focus_service_policy.py', 'focus_playlist_sync.py')
+ROOT_FILES = ('focus-helper', 'focus_youtube_guard.py', 'focus_service_policy.py', 'focus_playlist_sync.py', 'focus_study.py')
+ANKI_FILES = ('__init__.py', 'bridge.py', 'dashboard.py', 'manifest.json')
 YOUTUBE_DOMAINS = ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be', 'www.youtu.be',
                    'youtube-nocookie.com', 'www.youtube-nocookie.com', 'googlevideo.com', 'www.googlevideo.com',
                    'ytimg.com', 'www.ytimg.com', 'i.ytimg.com', 's.ytimg.com', 'youtubei.googleapis.com',
@@ -112,7 +113,8 @@ def migrate_youtube_usage(state):
 def sudoers_text(username):
     helper = str(BASE / 'focus-helper')
     commands = ('check', 'restore', 'stop', 'lease youtube', 'lease instagram', 'lease x', 'lease telegram',
-                'guard-check', 'youtube-status', 'youtube-policy', 'youtube-duration')
+                'guard-check', 'youtube-status', 'youtube-policy', 'youtube-duration',
+                'study-start', 'study-status', 'study-emergency-request', 'study-emergency-confirm')
     return username + ' ALL=(root) NOPASSWD: ' + ', '.join(helper + ' ' + c for c in commands) + '\n'
 
 
@@ -145,15 +147,30 @@ def secure_directory(path):
         raise RuntimeError('Root-owned directory required: ' + str(path))
 
 
-def main():
+def anki_destination(user):
+    base = Path(user.pw_dir).resolve() / 'Library/Application Support/Anki2/addons21'
+    if not base.is_dir() or any(path.is_symlink() for path in (base, *base.parents)):
+        raise RuntimeError('Не найден обычный каталог дополнений Anki: ' + str(base))
+    target = base / 'slovo_study_blocks'
+    if target.is_symlink():
+        raise RuntimeError('Refusing an Anki add-on symlink')
+    return target
+
+
+def main(install_anki=False):
     if os.geteuid() != 0:
         raise SystemExit('Run: sudo /usr/bin/python3 -I ' + str(SOURCE / 'install.py'))
     username = os.environ.get('SUDO_USER', '')
     if not username or username == 'root' or not re.fullmatch(r'[A-Za-z0-9_-]+', username):
         raise SystemExit('Run sudo from your regular user account.')
     user = pwd.getpwnam(username)
+    addon = anki_destination(user) if install_anki else None
     for name in ROOT_FILES + ('focus_open.py',):
         compile((SOURCE / name).read_text(), name, 'exec')
+    if addon:
+        for name in ANKI_FILES:
+            if name.endswith('.py'):
+                compile((SOURCE / 'anki_study' / name).read_text(), name, 'exec')
     incoming = json.loads((SOURCE / 'youtube-policy.json').read_text())
     secure_directory(BASE)
     secure_directory(RULE.parent)
@@ -181,11 +198,20 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX)
         if (BASE / 'lease.json').exists():
             raise SystemExit('A temporary session is active. Retry after it ends; its deadline is preserved.')
+        if (BASE / 'study.json').exists():
+            protected_study = json.loads((BASE / 'study.json').read_text())
+            if protected_study.get('schema') != 1 or protected_study.get('session'):
+                raise SystemExit('Учебный блок или перерыв активен. Установка не меняет его условия; дождись окончания.')
         configuration = json.loads((BASE / 'config.json').read_text()) if (BASE / 'config.json').exists() else {}
         if configuration.get('username', username) != username:
             raise SystemExit('The installed focus service belongs to a different account.')
         policy = merge_policy(json.loads((BASE / 'youtube-policy.json').read_text()) if (BASE / 'youtube-policy.json').exists() else None, incoming)
+        if addon:
+            addon.mkdir(mode=0o700, exist_ok=True)
+            os.chown(addon, user.pw_uid, user.pw_gid)
         destinations = [BASE / name for name in ROOT_FILES] + [BASE / name for name in ('config.json', 'youtube-policy.json', 'youtube-usage.json', 'service-usage.json')] + [HOSTS, PLIST, RULE, client]
+        if addon:
+            destinations += [addon / name for name in ANKI_FILES]
         launchers = ('focus-open', 'youtube', 'instagram', 'x', 'telegram')
         destinations += [local / 'bin' / name for name in launchers]
         for path in destinations:
@@ -205,6 +231,7 @@ def main():
             sys.path.insert(0, str(BASE))
             import focus_service_policy as socials
             import focus_youtube_guard as youtube
+            import focus_study as study
             configuration.update(username=username, uid=user.pw_uid)
             root_json(BASE / 'config.json', configuration)
             root_json(youtube.POLICY, policy, 0o644)
@@ -221,6 +248,7 @@ def main():
             text = HOSTS.read_text()
             for name, domains in (('YOUTUBE', YOUTUBE_DOMAINS), ('INSTAGRAM', INSTAGRAM_DOMAINS), ('X', socials.X_HOSTS), ('TELEGRAM', TELEGRAM_DOMAINS), ('VKVIDEO', VKVIDEO_DOMAINS)):
                 text = hosts_block(text, name, domains)
+            text = hosts_block(text, 'STUDY_WEB', study.DISTRACTION_DOMAINS)
             replace(HOSTS, text.encode(), 0o644)
             data = {'Label': 'local.focus-open.timer', 'ProgramArguments': ['/usr/bin/python3', '-I', str(BASE / 'focus-helper'), 'daemon'],
                     'RunAtLoad': True, 'KeepAlive': True, 'ThrottleInterval': 1,
@@ -231,6 +259,9 @@ def main():
             subprocess.run(['/usr/sbin/visudo', '-c', '-f', str(rule_tmp)], check=True)
             replace(RULE, rule_tmp.read_bytes(), 0o440)
             replace(client, (SOURCE / 'focus_open.py').read_bytes(), 0o755, user.pw_uid, user.pw_gid)
+            if addon:
+                for name in ANKI_FILES:
+                    replace(addon / name, (SOURCE / 'anki_study' / name).read_bytes(), 0o600, user.pw_uid, user.pw_gid)
             for name in launchers:
                 args = '' if name == 'focus-open' else ' ' + name
                 script = '#!/bin/sh\nexec python3 ' + shlex.quote(str(client)) + args + ' "$@"\n'
@@ -265,7 +296,12 @@ def main():
     print('Installed: youtube, instagram, x, telegram. Daily reset: midnight Europe/Moscow.')
     print('Approve macOS Automation requests for your browser if prompted. Restart Terminal for new commands.')
     print('Backup: ' + str(backup))
+    if addon:
+        print('Установлены «Учебные блоки · Слово». Перезапусти Anki; учебный блок сам не запускается.')
 
 
 if __name__ == '__main__':
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--anki', action='store_true', help='Установить панель учебных блоков в существующий Anki')
+    main(parser.parse_args().anki)

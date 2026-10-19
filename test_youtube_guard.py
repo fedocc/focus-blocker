@@ -366,6 +366,8 @@ class RootIntegrationTests(unittest.TestCase):
         self.stack.enter_context(patch.multiple(helper, BASE=self.base, STATE=self.base / 'lease.json', HOSTS=self.base / 'hosts', HEARTBEAT=self.base / 'heartbeat', OBSERVED={s:set() for s in helper.TEMPORARY_SERVICES}))
         self.stack.enter_context(patch.multiple(guard, BASE=self.base, HEALTH=self.base / 'health.json', LAST_EVENT=self.base / 'event.json', USAGE=self.base / 'usage.json', POLICY=self.base / 'policy.json'))
         self.stack.enter_context(patch.object(socials, 'USAGE', self.base / 'socials.json'))
+        self.stack.enter_context(patch.object(helper.study_lock, 'STATE', self.base / 'study.json'))
+        self.stack.enter_context(patch.object(helper, 'boot_identity', return_value='test-boot'))
         guard.POLICY.write_text(json.dumps(POLICY))
         socials.USAGE.write_text(json.dumps({'schema_version':1, 'services':{}}))
         self.hosts = ''.join('# === FOCUS_BLOCK:' + s.upper() + ' START ===\n127.0.0.1 ' + s + '.test\n# === FOCUS_BLOCK:' + s.upper() + ' END ===\n' for s in helper.TEMPORARY_SERVICES)

@@ -17,3 +17,6 @@ lock
 backups/
 verification*.json
 *verification.json
+study.json
+anki_study/user_files/
+dist/

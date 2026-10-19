@@ -18,6 +18,7 @@ sys.path.insert(0, str(BASE))
 import focus_youtube_guard as youtube
 import focus_service_policy as socials
 import focus_playlist_sync as playlist_sync
+import focus_study as study_lock
 HOSTS = Path('/etc/hosts')
 STATE = BASE / 'lease.json'
 HEARTBEAT = BASE / 'heartbeat'
@@ -32,6 +33,79 @@ PERMANENT_DOMAINS = {
         'video.vk.com',
     ),
 }
+
+
+_BOOT = None
+
+
+def boot_identity():
+    global _BOOT
+    if _BOOT is None:
+        result = subprocess.run(['/usr/sbin/sysctl', '-n', 'kern.boottime'],
+                                capture_output=True, text=True, timeout=3, check=True)
+        if not result.stdout.strip():
+            raise RuntimeError('Cannot identify the current system boot')
+        _BOOT = result.stdout.strip()
+    return _BOOT
+
+
+def study_status():
+    return study_lock.status(boot_identity())
+
+
+def require_no_focus():
+    current = study_status()['session']
+    if current and current['phase'] == 'focus':
+        raise RuntimeError('Идёт учебный блок. Развлекательный доступ закрыт до его окончания.')
+
+
+def guard_study_apps():
+    current = study_status()['session']
+    if not current or current['phase'] != 'focus':
+        return
+    # IDs are validated by the protected module. Hide rather than terminate:
+    # no unsaved documents or background processes are killed.
+    allowed = '{' + ', '.join(json.dumps(app) for app in current['apps']) + '}'
+    script = '''tell application "System Events"
+        set frontProcess to first application process whose frontmost is true
+        set frontID to bundle identifier of frontProcess
+        if frontID is missing value then return ""
+        if frontID is not in ALLOWED then
+            set visible of frontProcess to false
+            return frontID
+        end if
+    end tell
+    return ""'''.replace('ALLOWED', allowed)
+    blocked = youtube.user_script(script).strip()
+    study_lock.app_health(None)
+    if blocked:
+        study_lock.record_attempt('app', blocked)
+
+
+def start_study(request):
+    require_timer()
+    require_observer()
+    if read_lease():
+        raise RuntimeError('Сначала заверши текущий временный доступ к развлечениям.')
+    transform(HOSTS.read_text(), 'study_web', False)  # Validate before committing.
+    # Check frontmost-app observation permission before committing 80 minutes.
+    youtube.user_script('''tell application "System Events"
+        set frontProcess to first application process whose frontmost is true
+        set visible of frontProcess to visible of frontProcess
+        return bundle identifier of frontProcess
+    end tell''')
+    value = study_lock.start(request, boot_identity())
+    for service in SOCIAL_SERVICES:
+        set_access(service, False)
+    guard_cycle()
+    return value
+
+
+def set_study_web(active):
+    # Compatibility for older hosts fixtures/installations while idle. An
+    # active block always requires the installed marker (checked on start).
+    if active or '# === FOCUS_BLOCK:STUDY_WEB START ===' in HOSTS.read_text():
+        set_access('study_web', not active)
 
 
 def transform(text, service, unlock):
@@ -247,6 +321,7 @@ def lease_clock():
 
 
 def lease(service, seconds, youtube_scope=None):
+    require_no_focus()
     if service not in TEMPORARY_SERVICES or isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 21600:
         raise ValueError('Invalid lease')
     if service == 'youtube' and (not youtube_scope or youtube_scope.get('mode') != 'video'):
@@ -312,13 +387,28 @@ def remember_report(report, current):
 
 def guard_cycle():
     current = read_lease()
+    focus = study_lock.read()['session']
+    focusing = bool(focus and focus['phase'] == 'focus')
+    set_study_web(focusing)
     study = youtube.study_scope(youtube.read_policy())
     scope = dict(current['youtube_scope'], study_ids=study['allowed_ids'], playlist_ids=study['playlist_ids'], channel_ids=study.get('channel_ids', []), channel_paths=study.get('channel_paths', []), channel_video_ids=study.get('channel_video_ids', [])) if current and current['service'] == 'youtube' else study
     try:
         report = youtube.browser_report(tolerate_errors=True)
+        if focusing:
+            targets = youtube.targets_for(report, lambda u: bool(study_lock.distraction_site(u)))
+            if targets:
+                for site in {study_lock.distraction_site(t['url']) for t in targets}:
+                    study_lock.record_attempt('site', site)
+                youtube.close_tabs(targets)
+                report = youtube.browser_report(tolerate_errors=True)
+                remaining = youtube.targets_for(report, lambda u: bool(study_lock.distraction_site(u)))
+                if remaining:
+                    youtube.force_stop_browsers({t['application'] for t in remaining})
+                    report = youtube.browser_report(tolerate_errors=True)
         observer_errors = dict(getattr(report, 'errors', {}))
         denied = youtube.targets_for(report, lambda u: youtube.is_youtube_surface(u) and not youtube.url_allowed(scope, u))
         if denied:
+            study_lock.record_attempt('site', 'youtube')
             set_access('youtube', False)
             # An outside video revokes only the ordinary-video entitlement.
             # Lectures and an unrelated Telegram/Instagram timer remain intact.
@@ -345,6 +435,7 @@ def guard_cycle():
             if not allowed:
                 targets = youtube.targets_for(report, lambda u: socials.service_for_url(u) == service)
                 if targets:
+                    study_lock.record_attempt('site', service)
                     youtube.close_tabs(targets)
                     report = youtube.browser_report(tolerate_errors=True)
                     observer_errors = dict(getattr(report, 'errors', {}))
@@ -403,6 +494,7 @@ def startup():
     revoke_lease()
     for service in SOCIAL_SERVICES:
         set_access(service, False)
+    set_study_web(bool(study_lock.read()['session'] and study_lock.read()['session']['phase'] == 'focus'))
     youtube.publish_health(False, 'Проверка после запуска')
 
 
@@ -419,6 +511,11 @@ def main():
                 try:
                     expire()
                     enforce_permanent_blocks()
+                    try:
+                        guard_study_apps()
+                    except Exception as app_error:
+                        study_lock.app_health(str(app_error)[:500])
+                        youtube.record_event('study_app_error', str(app_error)[:500], [])
                     guard_cycle()
                 except Exception as error:
                     youtube.publish_health(False, str(error))
@@ -438,8 +535,18 @@ def main():
         duration = int(sys.stdin.read(16))
     if args == ['stop']:
         request = json.loads(sys.stdin.read(4096))
+    if args in (['study-start'], ['study-emergency-request'], ['study-emergency-confirm']):
+        request = json.loads(sys.stdin.read(32768))
     with locked():
-        if args == ['check']:
+        if args == ['study-status']:
+            print(json.dumps(dict(study_status(), service_running=timer_running()), ensure_ascii=False))
+        elif args == ['study-start']:
+            print(json.dumps(start_study(request), ensure_ascii=False))
+        elif args == ['study-emergency-request']:
+            print(json.dumps(study_lock.request_emergency(request, boot_identity()), ensure_ascii=False))
+        elif args == ['study-emergency-confirm']:
+            print(json.dumps(study_lock.confirm_emergency(request, boot_identity()), ensure_ascii=False))
+        elif args == ['check']:
             require_timer()
         elif args == ['restore']:
             restore()
@@ -456,6 +563,7 @@ def main():
         elif args == ['guard-check']:
             require_observer()
         elif args == ['youtube-duration']:
+            require_no_focus()
             current = read_lease()
             if not current or current.get('youtube_scope', {}).get('mode') != 'video':
                 raise RuntimeError('No single-video session is active')
@@ -476,6 +584,7 @@ def main():
                     # a timed educational grant or blocks a social window.
                     print(json.dumps({'deadline': None, 'scope': scope}, ensure_ascii=False))
                     return
+                require_no_focus()
                 if read_lease():
                     raise RuntimeError('Another temporary lease is active')
                 youtube.prepare_session(scope)

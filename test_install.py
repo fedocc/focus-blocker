@@ -55,7 +55,7 @@ class PolicyAndMigrationTests(unittest.TestCase):
     def test_sudo_exception_has_exact_scope_and_all_guard_commands(self):
         rule = install.sudoers_text('focus_test')
         commands = rule.split('NOPASSWD: ')[1].strip().split(', ')
-        self.assertEqual(len(commands), 11)
+        self.assertEqual(len(commands), 15)
         self.assertIn(str(install.BASE / 'focus-helper') + ' lease x', commands)
         self.assertIn(str(install.BASE / 'focus-helper') + ' youtube-duration', commands)
         self.assertFalse(any('*' in c or c.endswith(' daemon') or 'vkvideo' in c for c in commands))
@@ -132,6 +132,30 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(self.hosts.read_bytes(), hosts)
         self.assertTrue(lease.exists())
         self.run.assert_not_called()
+
+    def test_active_study_cannot_be_reinstalled_or_refunded(self):
+        state = self.base / 'study.json'
+        state.write_text('{"schema":1,"session":{"phase":"focus"},"last_emergency":1792396800}')
+        before = state.read_bytes()
+        with self.assertRaises(SystemExit):
+            install.main()
+        self.assertEqual(state.read_bytes(), before)
+        self.run.assert_not_called()
+
+    def test_optional_anki_install_preserves_private_preferences_and_existing_addons(self):
+        parent = self.home / 'Library/Application Support/Anki2/addons21'
+        target = parent / 'slovo_study_blocks'
+        private = target / 'user_files/preferences.json'
+        private.parent.mkdir(parents=True)
+        private.write_text('{"token":"keep-me"}')
+        other = parent / '1011095603'
+        other.mkdir()
+        (other / 'unchanged').write_text('theme')
+        install.main(install_anki=True)
+        for name in install.ANKI_FILES:
+            self.assertEqual((target / name).read_bytes(), (SOURCE / 'anki_study' / name).read_bytes())
+        self.assertEqual(private.read_text(), '{"token":"keep-me"}')
+        self.assertEqual((other / 'unchanged').read_text(), 'theme')
 
     def test_failed_bootstrap_restores_previous_code_hosts_and_rules(self):
         prior = {self.base/'focus-helper':b'previous helper',self.hosts:self.hosts.read_bytes(),self.rule:b'previous rule',self.plist:b'previous plist'}
