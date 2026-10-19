@@ -569,23 +569,25 @@ def helper_json(command: str, argument: str | None = None, payload: Any = None) 
 
 
 def record_session_end(state: dict[str, Any], lease: dict[str, Any], stopped: bool) -> None:
+    services = {lease['service'], *lease.get('additional_services', [])}
     active = state.get('active_unlock') or {}
-    if active.get('service') == lease['service']:
+    if active.get('service') in services:
         state.pop('active_unlock', None)
-    for entry in reversed(state.get('history', [])):
-        opened = parse_iso_datetime(entry.get('opened_at'))
-        if entry.get('service') == lease['service'] and opened and abs(opened.timestamp() - lease['started_at']) < 5:
-            if not entry.get('closed_at'):
-                entry['closed_at'] = now_local().isoformat()
-                entry['closing_reason'] = 'stopped' if stopped else 'expired'
-            break
+    for service in services:
+        for entry in reversed(state.get('history', [])):
+            opened = parse_iso_datetime(entry.get('opened_at'))
+            if entry.get('service') == service and opened and abs(opened.timestamp() - lease['started_at']) < 5:
+                if not entry.get('closed_at'):
+                    entry['closed_at'] = now_local().isoformat()
+                    entry['closing_reason'] = 'stopped' if stopped else 'expired'
+                break
     save_state(state)
 
 
 def require_service_slot(state: dict[str, Any], target: str, root_status: dict[str, Any] | None = None) -> bool:
     status = root_status if root_status is not None else helper_json('youtube-status')
     lease = status.get('lease')
-    if lease and lease['service'] == target:
+    if lease and target in {lease['service'], *lease.get('additional_services', [])}:
         print(SERVICES[target].display_name + ' уже открыт. Завершить сессию: focus-open stop')
         return False
     available = status.get('daily_available', {})
@@ -596,7 +598,7 @@ def require_service_slot(state: dict[str, Any], target: str, root_status: dict[s
         ensure_cooldown_allows(state, target, now_local())
     if not lease:
         return True
-    name = SERVICES[lease['service']].display_name
+    name = ', '.join(SERVICES[s].display_name for s in [lease['service'], *lease.get('additional_services', [])])
     question = f'Сейчас идёт сессия {name}. Завершить её и открыть {SERVICES[target].display_name}?'
     if not confirm(question):
         print('Текущая сессия продолжается.')
@@ -610,12 +612,13 @@ def stop_command(service: str | None = None) -> int:
     with exclusive_lock():
         state = load_state()
         lease = helper_json('youtube-status').get('lease')
-        if not lease or service is not None and lease['service'] != service:
+        if not lease or service is not None and service not in {lease['service'], *lease.get('additional_services', [])}:
             print('Активной временной сессии' + (' ' + SERVICES[service].display_name if service else '') + ' нет.')
             return 0
         result = helper_json('stop', payload={'service': lease['service'], 'started_at': lease['started_at']})
         record_session_end(state, lease, bool(result.get('stopped')))
-        print('Сессия ' + SERVICES[lease['service']].display_name + ' завершена.')
+        names = ', '.join(SERVICES[s].display_name for s in [lease['service'], *lease.get('additional_services', [])])
+        print('Сессия ' + names + ' завершена.')
     return 0
 
 

@@ -386,6 +386,60 @@ class RootIntegrationTests(unittest.TestCase):
         scope=guard.make_scope({'video_id':OTHER,'seconds':120}, POLICY,{},time.time())
         helper.lease('youtube',120,scope)
 
+    def bundle(self):
+        current=helper.lease('instagram',120)
+        current['additional_services']=['x']
+        guard.atomic_json(helper.STATE,current)
+        guard.atomic_json(socials.USAGE,socials.reserve('x',socials.read_usage(),current['started_at']))
+        return current
+
+    def test_administrative_social_bundle_keeps_both_sites_open(self):
+        self.bundle()
+        self.report.return_value=self.tabs('https://instagram.com/','https://x.com/','https://youtu.be/'+VIDEO)
+        self.assertTrue(helper.guard_cycle())
+        self.assertIn(helper.PREFIX+'127.0.0.1 instagram.test',helper.HOSTS.read_text())
+        self.assertIn(helper.PREFIX+'127.0.0.1 x.test',helper.HOSTS.read_text())
+        self.assertEqual(helper.read_lease()['observed_browsers'],['Arc'])
+        self.close.assert_not_called();self.force.assert_not_called()
+
+    def test_social_bundle_expires_both_sites_and_keeps_lecture_and_usage(self):
+        current=self.bundle();before=socials.USAGE.read_bytes()
+        lecture='https://youtu.be/'+VIDEO
+        self.report.side_effect=[self.tabs('https://instagram.com/','https://twitter.com/home',lecture),self.tabs(lecture),self.tabs(lecture)]
+        current['deadline']=time.time()-1;guard.atomic_json(helper.STATE,current)
+        helper.expire();helper.guard_cycle()
+        self.assertIsNone(helper.read_lease())
+        self.assertEqual({t['url'] for t in self.close.call_args.args[0]}, {'https://instagram.com/','https://twitter.com/home'})
+        self.assertNotIn(helper.PREFIX+'127.0.0.1 instagram.test',helper.HOSTS.read_text())
+        self.assertNotIn(helper.PREFIX+'127.0.0.1 x.test',helper.HOSTS.read_text())
+        self.assertEqual(socials.USAGE.read_bytes(),before)
+        self.force.assert_not_called()
+
+    def test_stopping_social_bundle_closes_both_sites(self):
+        current=self.bundle();lecture='https://youtu.be/'+VIDEO
+        self.report.side_effect=[self.tabs('https://instagram.com/','https://x.com/',lecture),self.tabs(lecture),self.tabs(lecture)]
+        helper.stop_session({'service':'instagram','started_at':current['started_at']})
+        self.assertIsNone(helper.read_lease())
+        self.assertEqual({t['url'] for t in self.close.call_args.args[0]}, {'https://instagram.com/','https://x.com/'})
+        self.force.assert_not_called()
+
+    def test_bundle_cannot_add_youtube_and_cli_does_not_accept_bundle_fields(self):
+        self.assertEqual(helper.lease_services({'service':'youtube','additional_services':['instagram','x']}),{'youtube'})
+        self.assertEqual(helper.lease_services({'service':'instagram','additional_services':['x','youtube','invalid',{},None]}),{'instagram','x'})
+        self.assertEqual(helper.lease_services({'service':'instagram','additional_services':'x'}),{'instagram'})
+        request={'video_id':OTHER,'additional_services':['x','instagram']}
+        scope=guard.make_scope(request,POLICY,{},time.time())
+        self.assertNotIn('additional_services',scope)
+
+    def test_partial_browser_failure_preserves_both_social_permissions(self):
+        self.bundle()
+        self.report.return_value=guard.BrowserReport(self.tabs('https://instagram.com/','https://x.com/'),{'Google Chrome':'timeout'})
+        self.assertFalse(helper.guard_cycle())
+        self.assertIn(helper.PREFIX+'127.0.0.1 instagram.test',helper.HOSTS.read_text())
+        self.assertIn(helper.PREFIX+'127.0.0.1 x.test',helper.HOSTS.read_text())
+        self.assertIsNotNone(helper.read_lease())
+        self.force.assert_not_called()
+
     def test_full_window_expiry_closes_browsing_and_keeps_lectures_and_quota(self):
         scope=dict(guard.study_scope(POLICY),mode='video',allowed_ids=[],study_ids=guard.study_scope(POLICY)['allowed_ids'],seconds=2100)
         current=helper.lease('youtube',2100,scope)
@@ -885,6 +939,31 @@ class ClientIntegrationTests(unittest.TestCase):
         self.open=self.stack.enter_context(patch.object(client,'open_url'))
         self.stack.enter_context(patch.object(client,'prepare_youtube_browser'))
         self.stack.enter_context(patch.object(client,'restore_all_hosts_blocks'))
+
+    def test_active_additional_service_does_not_prompt_or_consume_another_day(self):
+        lease={'service':'instagram','additional_services':['x'],'started_at':time.time()}
+        with patch.object(client,'helper_json',return_value={'lease':lease,'daily_available':{'x':False}}),patch('builtins.input',side_effect=AssertionError('unexpected prompt')),patch.object(client,'helper_command') as grant,contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(client.run_service('x'),1)
+        grant.assert_not_called();self.open.assert_not_called()
+
+    def test_x_stop_ends_bundle_using_primary_token_and_records_both_histories(self):
+        stamp=client.now_local().isoformat()
+        lease={'service':'instagram','additional_services':['x'],'started_at':client.parse_iso_datetime(stamp).timestamp()}
+        state={'services':{s:{'last_opened_at':stamp} for s in ('instagram','x')},
+            'active_unlock':{'service':'instagram'},
+            'history':[{'service':s,'opened_at':stamp,'closed_at':None} for s in ('instagram','x')]}
+        client.save_state(state)
+        def rpc(command,argument=None,payload=None):
+            if command=='youtube-status':return {'lease':lease}
+            self.assertEqual(command,'stop');self.assertEqual(payload,{'service':'instagram','started_at':lease['started_at']})
+            return {'stopped':True}
+        with patch.object(client,'helper_json',side_effect=rpc),contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(client.main(['x','--stop']),0)
+        after=client.load_state()
+        self.assertNotIn('active_unlock',after)
+        self.assertTrue(all(h.get('closed_at') and h['closing_reason']=='stopped' for h in after['history']))
+        self.assertEqual(after['services'],state['services'])
+        self.assertIn('Instagram, X',output.getvalue())
 
     def test_bare_youtube_prompts_for_link_without_course_choice(self):
         with patch.object(client,'run_osascript_dialog',side_effect=AssertionError('Unexpected course menu')),patch.object(client,'prompt_text',return_value='https://youtu.be/'+OTHER) as prompt:

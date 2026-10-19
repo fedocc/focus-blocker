@@ -136,18 +136,33 @@ def close_matching(predicate, observed=(), browsers=None):
         youtube.force_stop_browsers(reset)
 
 
+def lease_services(current):
+    if not current:
+        return set()
+    primary = current['service']
+    result = {primary}
+    # Additional social sites can only be written by an administrator into
+    # the protected lease. Ordinary grant commands never accept this field.
+    extra = current.get('additional_services', [])
+    if primary in SOCIAL_SERVICES and isinstance(extra, list):
+        result.update(s for s in extra if isinstance(s, str) and s in SOCIAL_SERVICES)
+    return result
+
+
 def revoke_lease():
     current = read_lease()
     if not current:
         return
     service = current['service']
-    set_access(service, False)
+    services = lease_services(current)
+    for name in sorted(services):
+        set_access(name, False)
     observed = current.get('observed_browsers', [])
     if service == 'youtube':
         study = youtube.study_scope(youtube.read_policy())
         close_matching(lambda u: youtube.is_youtube_surface(u) and not youtube.url_allowed(study, u), observed)
     else:
-        close_matching(lambda u: socials.service_for_url(u) == service, observed)
+        close_matching(lambda u: socials.service_for_url(u) in services, observed)
     # Keep an unrevoked record if closure fails; the daemon can retry it.
     STATE.unlink(missing_ok=True)
 
@@ -289,7 +304,7 @@ def remember_report(report, current):
         predicate = youtube.is_youtube_surface if service == 'youtube' else lambda u: socials.service_for_url(u) == service
         OBSERVED[service] = (OBSERVED[service] & set(getattr(report, 'errors', {}))) | {t['application'] for t in youtube.targets_for(report, predicate)}
     if current:
-        names = sorted(OBSERVED[current['service']])
+        names = sorted(set().union(*(OBSERVED[s] for s in lease_services(current))))
         if names != current.get('observed_browsers', []):
             current['observed_browsers'] = names
             youtube.atomic_json(STATE, current)
@@ -325,7 +340,7 @@ def guard_cycle():
                                  'Видеопредпросмотр закрыт; используйте прямую ссылку YouTube' if preview else 'Посторонняя вкладка закрыта; лекции доступны постоянно',
                                  {t['application'] for t in targets})
         for service in SOCIAL_SERVICES:
-            allowed = current is not None and current['service'] == service
+            allowed = service in lease_services(current)
             set_access(service, allowed)
             if not allowed:
                 targets = youtube.targets_for(report, lambda u: socials.service_for_url(u) == service)
@@ -342,7 +357,7 @@ def guard_cycle():
             set_access('youtube', False)
             # Reset cached denied connections only in the failed browser. The
             # healthy Arc carrying Telegram is not selected for a Chrome error.
-            blocked = {'youtube'} | {s for s in SOCIAL_SERVICES if not current or current['service'] != s}
+            blocked = {'youtube'} | (set(SOCIAL_SERVICES) - lease_services(current))
             reset = set().union(*(OBSERVED[s] for s in blocked)) & set(observer_errors) & set(youtube.BROWSERS)
             if reset:
                 youtube.force_stop_browsers(reset)
@@ -358,10 +373,10 @@ def guard_cycle():
         youtube.publish_health(True)
     except Exception as error:
         set_access('youtube', False)
-        active_social = current['service'] if current and current['service'] in SOCIAL_SERVICES else None
+        active_social = lease_services(current) & set(SOCIAL_SERVICES)
         blocked = {'youtube'}
         for service in SOCIAL_SERVICES:
-            allowed = service == active_social
+            allowed = service in active_social
             set_access(service, allowed)
             if not allowed:
                 blocked.add(service)
