@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 def build():
     destination = ROOT / 'dist'
     destination.mkdir(exist_ok=True)
-    addon_files = ('__init__.py', 'dashboard.py', 'bridge.py', 'manifest.json') + tuple(
+    addon_files = ('__init__.py', 'dashboard.py', 'bridge.py', 'analytics.py', 'focus-stats.js', 'focus-stats.css', 'manifest.json') + tuple(
         f'wallpaper-{scene}.png' for scene in ('dawn', 'day', 'evening', 'night'))
     addon = destination / 'slovo-study-blocks.ankiaddon'
     with zipfile.ZipFile(addon, 'w', compression=zipfile.ZIP_DEFLATED) as archive:

@@ -10,7 +10,7 @@ from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDial
                     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QProgressBar,
                     QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl, QAbstractItemView,
                     QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy)
-from . import bridge
+from . import bridge, analytics
 
 PREFS = Path(__file__).parent / 'user_files/preferences.json'
 
@@ -172,6 +172,9 @@ class StudyDock(QDockWidget):
         self.last_phase = None
         self.last_plan_at = 0
         self.closed = False
+        self.stats_seen_at = 0
+        self.usage_tracker = None
+        self.foreground = None
         try:
             self.preferences = json.loads(PREFS.read_text())
         except (OSError, ValueError):
@@ -385,6 +388,12 @@ class StudyDock(QDockWidget):
                 self.start.setEnabled(False)
                 return
             self.state = value
+            self.stats_seen_at = time.monotonic()
+            if self.usage_tracker:
+                try:
+                    self.usage_tracker.remember(value.get('history', []))
+                except Exception as error:
+                    self.usage_error = str(error)
             status_item = getattr(self, 'menu_timer', None)
             if status_item:
                 status_item.seen_at = time.monotonic()
@@ -623,7 +632,7 @@ def show_study():
 
 
 def loaded():
-    mw.addonManager.setWebExports(__name__, r'wallpaper-(dawn|day|evening|night)\.png')
+    mw.addonManager.setWebExports(__name__, r'(wallpaper-(dawn|day|evening|night)\.png|focus-stats\.(js|css))')
     action = QAction('Учебные блоки · Слово', mw)
     action.triggered.connect(show_study)
     mw.form.menuTools.addAction(action)
@@ -639,6 +648,40 @@ def loaded():
     ensure_study()
     if sys.platform == 'darwin':
         dock = mw._slovo_study_dock
+        try:
+            dock.usage_tracker = analytics.UsageTracker(PREFS.parent / 'focus-usage.sqlite3')
+            dock.foreground = analytics.MacForeground()
+            dock.usage_timer = QTimer(dock)
+            def sample_usage():
+                if not dock.preferences.get('track_apps', True):
+                    dock.usage_tracker.previous = None
+                    return
+                try:
+                    state = dict(dock.state or {})
+                    if state.get('session'):
+                        state['session'] = dict(state['session'], remaining=bridge.remaining_seconds(state))
+                    # No app observation outside a fresh, running focus block.
+                    fresh = time.monotonic() - dock.stats_seen_at < 8
+                    active = fresh and (state.get('session') or {}).get('phase') == 'focus'
+                    app = dock.foreground.current() if active else None
+                    dock.usage_tracker.sample(state, app, time.time(), time.monotonic(), fresh=fresh)
+                except Exception as error:
+                    dock.usage_error = str(error)
+            dock.usage_timer.timeout.connect(sample_usage)
+            dock.usage_timer.start(5000)
+            track_apps = QAction('Учитывать время приложений в учебных блоках', mw)
+            track_apps.setCheckable(True)
+            track_apps.setChecked(dock.preferences.get('track_apps', True))
+            def toggle_tracking(checked):
+                dock.preferences['track_apps'] = checked
+                dock.usage_tracker.previous = None
+                bridge.save_preferences(PREFS, dock.preferences)
+                update_home_widget()
+            track_apps.toggled.connect(toggle_tracking)
+            mw.form.menuTools.addAction(track_apps)
+            mw._slovo_tracking_action = track_apps
+        except Exception as error:
+            dock.usage_error = str(error)
         try:
             dock.menu_timer = MenuTimer(dock)
             visible = dock.preferences.get('menu_timer_visible', True)
@@ -666,6 +709,11 @@ def unloaded():
     if dock:
         dock.closed = True
         dock.poller.stop()
+        dock.display_timer.stop()
+        if getattr(dock, 'usage_timer', None):
+            dock.usage_timer.stop()
+        if dock.usage_tracker:
+            dock.usage_tracker.close()
         if getattr(dock, 'menu_timer', None):
             dock.menu_timer.close()
         mw.removeDockWidget(dock)
@@ -677,7 +725,7 @@ def unloaded():
         mw.form.menuTools.removeAction(action)
         action.deleteLater()
         mw._slovo_study_action = None
-    for name in ('_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action'):
+    for name in ('_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action', '_slovo_tracking_action'):
         extra = getattr(mw, name, None)
         if extra:
             mw.form.menuTools.removeAction(extra)
@@ -822,6 +870,8 @@ HOME_SCRIPT = r'''
 })();
 '''
 
+STATS_SCRIPT = (Path(__file__).parent / 'focus-stats.js').read_text()
+
 
 def update_home_widget(*_):
     if not mw.col or mw.state != 'deckBrowser':
@@ -847,11 +897,24 @@ def update_home_widget(*_):
         'planBusy': bool(dock and dock.plan_busy),
     }
     mw.deckBrowser.web.eval(HOME_SCRIPT.replace('ADDON_PACKAGE', mw.addonManager.addonFromModule(__name__)).replace('PAYLOAD', json.dumps(payload, ensure_ascii=False)))
+    usage = dock.usage_tracker.summary() if dock and dock.usage_tracker else {}
+    stats_state = dict(state or {})
+    if dock and dock.usage_tracker:
+        stats_state['history'] = list(dock.usage_tracker.blocks.values()) + (state or {}).get('history', [])
+    stats = analytics.snapshot(stats_state, usage, remaining=bridge.remaining_seconds(state))
+    stats['mode'] = dock.preferences.get('stats_mode', 'focus') if dock else 'focus'
+    stats['tracking'] = bool(dock and dock.usage_tracker and dock.preferences.get('track_apps', True) and not getattr(dock, 'usage_error', None))
+    mw.deckBrowser.web.eval(STATS_SCRIPT.replace('ADDON_PACKAGE', mw.addonManager.addonFromModule(__name__)).replace('PAYLOAD', json.dumps(stats, ensure_ascii=False)))
 
 
 def home_message(handled, message, context):
     if handled[0] or context is not mw.deckBrowser:
         return handled
+    if message in ('slovo:stats-mode:cards', 'slovo:stats-mode:focus'):
+        dock = ensure_study()
+        dock.preferences['stats_mode'] = message.rsplit(':', 1)[1]
+        bridge.save_preferences(PREFS, dock.preferences)
+        return True, None
     if message == 'slovo:open':
         show_study()
         return True, None
