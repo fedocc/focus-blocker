@@ -446,6 +446,7 @@ class StudyDock(QDockWidget):
         self.update_app_summary()
 
     def choose_task(self, index):
+        self.title.setVisible(index <= 0)
         if 0 < index <= len(self.tasks):
             self.title.setText(self.tasks[index - 1]['title'])
 
@@ -480,12 +481,19 @@ class StudyDock(QDockWidget):
         # A late network response must not replace the committed task UI.
         if self.state and self.state.get('session'):
             return
+        old_index = self.task_list.currentIndex() - 1
+        selected_id = self.tasks[old_index].get('occurrence_id') if 0 <= old_index < len(self.tasks) else None
         self.tasks = value['tasks']
         self.plan_date = value['date']
+        self.task_list.blockSignals(True)
         self.task_list.clear()
         self.task_list.addItem('Своя задача')
         for task in self.tasks:
             self.task_list.addItem(task['title'])
+        selected_index = next((i + 1 for i, task in enumerate(self.tasks) if selected_id and task.get('occurrence_id') == selected_id), 0)
+        self.task_list.setCurrentIndex(selected_index)
+        self.task_list.blockSignals(False)
+        self.choose_task(selected_index)
         self.task_list.setVisible(bool(self.tasks))
         self.pair.setText('Слово подключено')
         self.message.setText(f'План на {value["date"]}: задач {len(self.tasks)}. Выбери одну и нужные приложения.')
@@ -566,6 +574,7 @@ def show_study():
 
 
 def loaded():
+    mw.addonManager.setWebExports(__name__, r'wallpaper-(dawn|day|evening|night)\.png')
     action = QAction('Учебные блоки · Слово', mw)
     action.triggered.connect(show_study)
     mw.form.menuTools.addAction(action)
@@ -634,6 +643,32 @@ HOME_SCRIPT = r'''
 (() => {
  const host = document.querySelector('.sidebar-expanded-content');
  if (!host) return;
+ if (!document.getElementById('slovo-daylight-style')) {
+  const style=document.createElement('style');style.id='slovo-daylight-style';
+  style.textContent=`
+   html body .container.modern-main-menu::before {
+    background-image:var(--slovo-wallpaper) !important;
+   }
+   #onigiri-heatmap-container .heatmap-day-cell.today {
+    outline:1px solid #e26666 !important;outline-offset:1px;border-radius:3px;
+   }
+   #onigiri-heatmap-container .heatmap-day-cell.today .day-shape {animation:none !important;}
+  `;
+  document.head.appendChild(style);
+  const updateDaylight=()=>{
+   const hour=new Date().getHours();
+   const scene=hour>=6&&hour<10?'dawn':hour>=10&&hour<17?'day':hour>=17&&hour<21?'evening':'night';
+   if(document.documentElement.dataset.slovoScene===scene)return;
+   const url='/_addons/ADDON_PACKAGE/wallpaper-'+scene+'.png';
+   const preload=new Image();preload.onload=()=>{
+    document.documentElement.style.setProperty('--slovo-wallpaper','url("'+url+'")');
+    document.documentElement.dataset.slovoScene=scene;
+   };preload.src=url;
+  };
+  updateDaylight();
+  const clock=setInterval(()=>{if(!style.isConnected){clearInterval(clock);return;}updateDaylight();},30000);
+  document.addEventListener('visibilitychange',updateDaylight);
+ }
  let el = document.getElementById('slovo-home-focus');
  if (!el) {
   el = document.createElement('section'); el.id = 'slovo-home-focus';
@@ -754,7 +789,7 @@ def update_home_widget(*_):
         'connected': bool(dock and dock.preferences.get('token')),
         'planBusy': bool(dock and dock.plan_busy),
     }
-    mw.deckBrowser.web.eval(HOME_SCRIPT.replace('PAYLOAD', json.dumps(payload, ensure_ascii=False)))
+    mw.deckBrowser.web.eval(HOME_SCRIPT.replace('ADDON_PACKAGE', mw.addonManager.addonFromModule(__name__)).replace('PAYLOAD', json.dumps(payload, ensure_ascii=False)))
 
 
 def home_message(handled, message, context):

@@ -23,7 +23,8 @@ PLIST = Path('/Library/LaunchDaemons/local.focus-open.timer.plist')
 RULE = Path('/private/etc/sudoers.d/focus-open')
 HOSTS = Path('/private/etc/hosts')
 ROOT_FILES = ('focus-helper', 'focus_youtube_guard.py', 'focus_service_policy.py', 'focus_playlist_sync.py', 'focus_study.py')
-ANKI_FILES = ('__init__.py', 'bridge.py', 'dashboard.py', 'manifest.json')
+ANKI_FILES = ('__init__.py', 'bridge.py', 'dashboard.py', 'manifest.json') + tuple(
+    f'wallpaper-{scene}.png' for scene in ('dawn', 'day', 'evening', 'night'))
 YOUTUBE_DOMAINS = ('youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be', 'www.youtu.be',
                    'youtube-nocookie.com', 'www.youtube-nocookie.com', 'googlevideo.com', 'www.googlevideo.com',
                    'ytimg.com', 'www.ytimg.com', 'i.ytimg.com', 's.ytimg.com', 'youtubei.googleapis.com',
