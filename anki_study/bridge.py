@@ -7,12 +7,37 @@ import plistlib
 import re
 import subprocess
 import tempfile
+import time
 import urllib.request
 from xml.parsers.expat import ExpatError
 
 ORIGIN = 'https://slovo.45-80-228-215.sslip.io'
 HELPER = '/Library/PrivilegedHelperTools/focus-open/focus-helper'
 COMMANDS = {'study-status', 'study-start', 'study-emergency-request', 'study-emergency-confirm'}
+
+
+def remaining_seconds(state):
+    """Use the service's system clock, independent of response latency and NTP."""
+    session = (state or {}).get('session')
+    if not session:
+        return 4800
+    deadline = session.get('deadline_mono')
+    if isinstance(deadline, (int, float)):
+        return max(0, deadline - time.clock_gettime(time.CLOCK_MONOTONIC))
+    return max(0, session['remaining'])
+
+
+def block_task(tasks, custom_title=''):
+    if not tasks:
+        return {'title': custom_title.strip()}
+    if len(tasks) == 1:
+        return {key: tasks[0][key] for key in ('title', 'url', 'occurrence_id')}
+    if len(tasks) > 30:
+        raise ValueError('В одном блоке можно выбрать до 30 задач')
+    title = ' · '.join(task['title'] for task in tasks)
+    if len(title) > 300:
+        title = f'{len(tasks)} задач: ' + title[:280] + '…'
+    return {'title': title, 'items': [{key: task[key] for key in ('title', 'url', 'occurrence_id')} for task in tasks]}
 
 
 def archive_collection(col, backup):

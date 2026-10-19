@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import focus_study as study
+import install as installer
 import test_youtube_guard as guards
 helper, guard = guards.helper, guards.guard
 
@@ -46,6 +47,47 @@ class StudyTests(unittest.TestCase):
             self.start()
         self.assertIn('com.apple.Photos', session['apps'])
         self.assertIn('net.ankiweb.anki', session['apps'])
+
+    def test_multiple_tasks_are_validated_and_committed_independently_of_ui(self):
+        items = [{'title': 'Лекция DL', 'occurrence_id': 'dl', 'url': 'https://slovo.45-80-228-215.sslip.io/?task=dl'},
+                 {'title': 'Алгоритмы', 'occurrence_id': 'algo', 'url': 'https://slovo.45-80-228-215.sslip.io/?task=algo'}]
+        self.request['task'] = {'title': 'Две задачи', 'items': items}
+        self.start()
+        items[0]['title'] = 'Подмена'
+        snapshot = study.read()['session']['task']['items']
+        self.assertEqual([item['occurrence_id'] for item in snapshot], ['dl', 'algo'])
+        self.assertEqual(snapshot[0]['title'], 'Лекция DL')
+        with self.assertRaises(RuntimeError):
+            self.start()
+
+    def test_nested_duplicate_and_external_grouped_tasks_are_rejected(self):
+        for items in ([{'title':'x','items':[{'title':'y'}]}],
+                      [{'title':'x','occurrence_id':'same'},{'title':'y','occurrence_id':'same'}],
+                      [{'title':'x','url':'https://other.example/'}], [], [{'title':'x'}]*31):
+            with self.assertRaises(ValueError):
+                study.start({'task': {'title': 'Группа', 'items': items}, 'apps': []}, self.boot, self.now, self.mono)
+        self.assertFalse(study.STATE.exists())
+
+    def test_explicit_installer_repair_preserves_history_and_charges_exit(self):
+        self.start()
+        value = study.read()
+        value['history'] = [{'id':'old','outcome':'completed','ended_at':self.now-100}]
+        fixed = installer.interrupt_for_repair(value, self.now + 500)
+        self.assertIsNotNone(value['session'], 'repair returns a snapshot; no implicit state mutation')
+        self.assertIsNone(fixed['session'])
+        self.assertEqual(fixed['last_emergency'], self.now + 500)
+        self.assertEqual(fixed['history'][0], value['history'][0])
+        self.assertEqual(fixed['history'][-1]['outcome'], 'interrupted')
+        self.assertFalse(study.emergency_available(fixed, self.now + 501))
+
+    def test_helper_uses_stable_boot_uuid_and_caches_it(self):
+        from types import SimpleNamespace
+        boot_id = '8C277B74-17D0-4677-A3B4-1B76E5B84A85'
+        with patch.object(helper, '_BOOT', None), patch.object(helper.subprocess, 'run', return_value=SimpleNamespace(stdout=boot_id)) as run:
+            self.assertEqual(helper.boot_identity(), boot_id.lower())
+            self.assertEqual(helper.boot_identity(), boot_id.lower())
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0], ['/usr/sbin/sysctl','-n','kern.bootsessionuuid'])
 
     def test_alternating_mandatory_breaks_and_five_plus_optional_progress(self):
         for index in range(1, 7):

@@ -10,6 +10,22 @@ from anki_study import bridge
 
 
 class BridgeTests(unittest.TestCase):
+    def test_remaining_uses_protected_deadline_despite_stale_response(self):
+        state = {'session': {'remaining':4800, 'deadline_mono':14800}}
+        with patch.object(bridge.time, 'clock_gettime', return_value=10300):
+            self.assertEqual(bridge.remaining_seconds(state), 4500)
+        with patch.object(bridge.time, 'clock_gettime', return_value=15000):
+            self.assertEqual(bridge.remaining_seconds(state), 0)
+        self.assertEqual(bridge.remaining_seconds({'session':None}), 4800)
+
+    def test_group_summary_keeps_every_full_task_even_when_titles_are_long(self):
+        tasks = [{'title':str(i)+'Я'*290,'url':bridge.ORIGIN+'/?task='+str(i),'occurrence_id':str(i)} for i in range(4)]
+        group = bridge.block_task(tasks)
+        self.assertLessEqual(len(group['title']), 300)
+        self.assertEqual(group['items'], tasks)
+        self.assertEqual(bridge.block_task(tasks[:1]), tasks[0])
+        self.assertEqual(bridge.block_task([], ' Своя задача '), {'title':'Своя задача'})
+
     def test_one_broken_application_does_not_break_the_app_picker(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

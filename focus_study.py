@@ -121,16 +121,11 @@ def status(boot, now=None, mono=None):
                 attempts_today=attempts, emergency_available=emergency_available(value, now), now=now)
 
 
-def start(request, boot, now=None, mono=None):
-    now = time.time() if now is None else now
-    mono = clock() if mono is None else mono
-    if not isinstance(request, dict) or set(request) != {'task', 'apps'}:
-        raise ValueError('Нужны только задача и приложения')
-    task = request['task']
-    if not isinstance(task, dict) or set(task) - {'title', 'url', 'occurrence_id'} or 'title' not in task:
+def clean_task(task, grouped=True):
+    allowed = {'title', 'url', 'occurrence_id'} | ({'items'} if grouped else set())
+    if not isinstance(task, dict) or set(task) - allowed or 'title' not in task:
         raise ValueError('Некорректная задача')
     clean = {'title': valid_text(task['title'], 300)}
-    # Only a link back to the planner, never arbitrary executable URLs.
     if task.get('url'):
         url = valid_text(task['url'], 2048)
         if not url.startswith('https://slovo.45-80-228-215.sslip.io/'):
@@ -138,6 +133,23 @@ def start(request, boot, now=None, mono=None):
         clean['url'] = url
     if task.get('occurrence_id'):
         clean['occurrence_id'] = valid_text(task['occurrence_id'], 100)
+    if 'items' in task:
+        items = task['items']
+        if not isinstance(items, list) or not 1 <= len(items) <= 30:
+            raise ValueError('Выбери от 1 до 30 задач')
+        clean['items'] = [clean_task(item, grouped=False) for item in items]
+        ids = [item['occurrence_id'] for item in clean['items'] if 'occurrence_id' in item]
+        if len(set(ids)) != len(ids):
+            raise ValueError('Задачи повторяются')
+    return clean
+
+
+def start(request, boot, now=None, mono=None):
+    now = time.time() if now is None else now
+    mono = clock() if mono is None else mono
+    if not isinstance(request, dict) or set(request) != {'task', 'apps'}:
+        raise ValueError('Нужны только задача и приложения')
+    clean = clean_task(request['task'])
     apps = request['apps']
     if (not isinstance(apps, list) or len(apps) > 100 or
             any(not isinstance(app, str) or not BUNDLE_ID.fullmatch(app) for app in apps)):

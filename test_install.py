@@ -13,6 +13,7 @@ from unittest.mock import patch
 import install
 import focus_service_policy as socials
 import focus_youtube_guard as guard
+import focus_study as study
 
 SOURCE = Path(__file__).resolve().parent
 POLICY = json.loads((SOURCE / 'youtube-policy.json').read_text())
@@ -141,6 +142,30 @@ class InstallationTests(unittest.TestCase):
             install.main()
         self.assertEqual(state.read_bytes(), before)
         self.run.assert_not_called()
+
+    def test_explicit_repair_stops_focus_and_rolls_state_back_if_install_fails(self):
+        state = self.base / 'study.json'
+        current = {'schema':1, 'history':[], 'last_emergency':None,
+                   'session':{'id':'session-1','phase':'focus','task':{'title':'Study'},'apps':[],
+                              'started_at':100,'remaining':4790,'attempts':{},'app_attempts':{}}}
+        state.write_text(json.dumps(current))
+        before = state.read_bytes()
+        def fail(args, **kwargs):
+            if args[:2] == ['/bin/launchctl','bootstrap']:
+                raise subprocess.CalledProcessError(1,args)
+            return SimpleNamespace(returncode=0)
+        self.run.side_effect = fail
+        with patch.object(study,'STATE',state):
+            with self.assertRaises(subprocess.CalledProcessError):
+                install.main(stop_current_study=True)
+        self.assertEqual(state.read_bytes(), before)
+        self.run.side_effect = None
+        with patch.object(study,'STATE',state):
+            install.main(stop_current_study=True)
+        repaired = json.loads(state.read_text())
+        self.assertIsNone(repaired['session'])
+        self.assertEqual(repaired['history'][-1]['outcome'],'interrupted')
+        self.assertIsNotNone(repaired['last_emergency'])
 
     def test_optional_anki_install_preserves_private_preferences_and_existing_addons(self):
         parent = self.home / 'Library/Application Support/Anki2/addons21'

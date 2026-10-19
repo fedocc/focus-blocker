@@ -158,7 +158,27 @@ def anki_destination(user):
     return target
 
 
-def main(install_anki=False):
+def interrupt_for_repair(value, now):
+    """Only the explicitly invoked, administrator-authorized installer uses this.
+
+    There is no new sudoers/helper escape command. Preserve all history and
+    charge the ordinary daily emergency exit for this interrupted block.
+    """
+    value = copy.deepcopy(value)
+    session = value.get('session')
+    if session:
+        if session.get('phase') != 'focus':
+            raise ValueError('Ремонтная остановка предназначена для активного учебного блока.')
+        entry = {k: copy.deepcopy(session[k]) for k in ('id', 'task', 'apps', 'started_at', 'attempts', 'app_attempts')}
+        entry.update(ended_at=now, outcome='interrupted', seconds=max(0, 4800 - session['remaining']),
+                     reason='Остановка зависшего блока при ремонте службы по запросу пользователя')
+        value['history'] = (value['history'] + [entry])[-1000:]
+        value['last_emergency'] = now
+        value['session'] = None
+    return value
+
+
+def main(install_anki=False, stop_current_study=False):
     if os.geteuid() != 0:
         raise SystemExit('Run: sudo /usr/bin/python3 -I ' + str(SOURCE / 'install.py'))
     username = os.environ.get('SUDO_USER', '')
@@ -189,7 +209,7 @@ def main(install_anki=False):
     state = json.loads(state_path.read_text()) if state_path.exists() else {'services': {}, 'history': []}
     if not isinstance(state, dict) or not isinstance(state.get('services', {}), dict) or not isinstance(state.get('history', []), list):
         raise SystemExit('Legacy client history is invalid; refusing to reset it')
-    stamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S')
+    stamp = dt.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
     secure_directory(BASE / 'backups')
     backup = BASE / 'backups' / ('install-' + stamp)
     backup.mkdir(mode=0o700)
@@ -201,8 +221,10 @@ def main(install_anki=False):
             raise SystemExit('A temporary session is active. Retry after it ends; its deadline is preserved.')
         if (BASE / 'study.json').exists():
             protected_study = json.loads((BASE / 'study.json').read_text())
-            if protected_study.get('schema') != 1 or protected_study.get('session'):
+            if protected_study.get('schema') != 1 or (protected_study.get('session') and not stop_current_study):
                 raise SystemExit('Учебный блок или перерыв активен. Установка не меняет его условия; дождись окончания.')
+            if stop_current_study:
+                interrupt_for_repair(protected_study, time.time())  # Validate before changing files.
         configuration = json.loads((BASE / 'config.json').read_text()) if (BASE / 'config.json').exists() else {}
         if configuration.get('username', username) != username:
             raise SystemExit('The installed focus service belongs to a different account.')
@@ -211,6 +233,8 @@ def main(install_anki=False):
             addon.mkdir(mode=0o700, exist_ok=True)
             os.chown(addon, user.pw_uid, user.pw_gid)
         destinations = [BASE / name for name in ROOT_FILES] + [BASE / name for name in ('config.json', 'youtube-policy.json', 'youtube-usage.json', 'service-usage.json')] + [HOSTS, PLIST, RULE, client]
+        if stop_current_study:
+            destinations.append(BASE / 'study.json')
         if addon:
             destinations += [addon / name for name in ANKI_FILES]
         launchers = ('focus-open', 'youtube', 'instagram', 'x', 'telegram')
@@ -246,6 +270,8 @@ def main(install_anki=False):
                 root_json(socials.USAGE, socials.migrate_client_state(state))
             else:
                 socials.read_usage()
+            if stop_current_study and study.STATE.exists():
+                study.save(interrupt_for_repair(study.read(), time.time()))
             text = HOSTS.read_text()
             for name, domains in (('YOUTUBE', YOUTUBE_DOMAINS), ('INSTAGRAM', INSTAGRAM_DOMAINS), ('X', socials.X_HOSTS), ('TELEGRAM', TELEGRAM_DOMAINS), ('VKVIDEO', VKVIDEO_DOMAINS)):
                 text = hosts_block(text, name, domains)
@@ -305,4 +331,6 @@ if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--anki', action='store_true', help='Установить панель учебных блоков в существующий Anki')
-    main(parser.parse_args().anki)
+    parser.add_argument('--stop-current-study', action='store_true', help='Явно прервать зависший учебный блок при ремонте; потратит дневной экстренный выход')
+    options = parser.parse_args()
+    main(options.anki, options.stop_current_study)

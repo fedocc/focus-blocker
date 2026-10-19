@@ -2,12 +2,13 @@
 import json
 import time
 import sys
+import math
 from pathlib import Path
 
 from aqt import mw, gui_hooks
 from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDialog, QDialog, QFrame,
                     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QProgressBar,
-                    QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl,
+                    QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl, QAbstractItemView,
                     QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy)
 from . import bridge
 
@@ -57,6 +58,9 @@ QDialog#focusPicker QListWidget::item { padding: 10px; border-radius: 7px; }
 QDialog#focusPicker QListWidget::item:hover { background: #203f4c; }
 QDialog#focusPicker QListWidget::item:selected { background: #2b4c56; }
 QDialog#focusPicker QListWidget::indicator { width: 17px; height: 17px; }
+QWidget#focusRoot QListWidget#focusTasks { background:#102934; color:#dbe7eb; border:1px solid #294550; border-radius:9px; outline:none; padding:4px; }
+QWidget#focusRoot QListWidget#focusTasks::item { padding:9px 4px; }
+QWidget#focusRoot QListWidget#focusTasks::indicator { width:17px; height:17px; }
 '''
 
 
@@ -131,7 +135,7 @@ class MenuTimer:
         text = 'Фокус · готов'
         tip = 'Учебные блоки · Anki'
         if session:
-            remaining = max(0, int(session['remaining'] - (time.monotonic() - self.seen_at)))
+            remaining = math.ceil(bridge.remaining_seconds(state))
             prefix = '◉' if session['phase'] == 'focus' else '☕'
             text = f'{prefix} {remaining // 60:02}:{remaining % 60:02}'
             tip = session['task']['title']
@@ -163,6 +167,7 @@ class StudyDock(QDockWidget):
         self.polling = False
         self.plan_busy = False
         self.tasks = []
+        self.selected_ids = set()
         self.plan_date = ''
         self.last_phase = None
         self.last_plan_at = 0
@@ -207,7 +212,7 @@ class StudyDock(QDockWidget):
         self.timer_label = label('80:00', 'timer')
         self.timer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hero.addWidget(self.timer_label)
-        self.heading = label('Один блок — одна задача', 'taskHeading')
+        self.heading = label('Выбери задачи для блока', 'taskHeading')
         self.heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.heading.setMaximumHeight(56)
         hero.addWidget(self.heading)
@@ -228,13 +233,12 @@ class StudyDock(QDockWidget):
         self.progress = label('Пять основных блоков. Шестой — по желанию.')
         layout.addWidget(self.progress)
         self.task_card, task_layout = card(layout)
-        task_layout.addWidget(label('01   Задача блока', 'sectionTitle'))
-        self.task_list = QComboBox()
-        self.task_list.setMinimumContentsLength(12)
-        self.task_list.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        task_layout.addWidget(label('01   Задачи блока', 'sectionTitle'))
+        self.task_list = QListWidget()
+        self.task_list.setObjectName('focusTasks')
+        self.task_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.task_list.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.task_list.addItem('Своя задача')
-        self.task_list.currentIndexChanged.connect(self.choose_task)
+        self.task_list.itemChanged.connect(self.selection_changed)
         self.task_list.hide()
         task_layout.addWidget(self.task_list)
         self.title = QLineEdit()
@@ -348,6 +352,9 @@ class StudyDock(QDockWidget):
         self.poller = QTimer(self)
         self.poller.timeout.connect(self.poll)
         self.poller.start(2000)
+        self.display_timer = QTimer(self)
+        self.display_timer.timeout.connect(self.tick_display)
+        self.display_timer.start(250)
         self.poll()
         if self.preferences.get('token'):
             self.load_plan()
@@ -393,8 +400,7 @@ class StudyDock(QDockWidget):
             self.emergency.setVisible(phase == 'focus')
             self.phase_tag.setText({'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА'}[phase])
             self.start.setText({'idle': 'Начать блок   →', 'focus': 'Блок идёт · настройки закрыты', 'break': 'Сначала восстановись'}[phase])
-            seconds = round(session['remaining']) if session else 4800
-            self.timer_label.setText(f'{seconds // 60:02}:{seconds % 60:02}')
+            self.tick_display()
             count = value['completed_today']
             self.day_progress.setValue(min(count, 6))
             self.day_count.setText(f'{count} / 5')
@@ -404,8 +410,13 @@ class StudyDock(QDockWidget):
                                   f'\nСрабатываний за день: {value.get("attempts_today", 0)}')
             if session:
                 self.heading.setText(session['task']['title'])
+                committed = session['task'].get('items', [session['task']])
+                if self.last_phase != phase:
+                    self.render_tasks(committed, locked=True)
             else:
-                self.heading.setText('Один блок — одна задача')
+                self.heading.setText('Выбери задачи для блока')
+                if self.last_phase in ('focus', 'break'):
+                    self.render_tasks(self.tasks)
             if not value.get('service_running', False):
                 self.message.setText('Системная служба не запущена. Блокировка не подтверждена; новые блоки закрыты.')
             elif session and session.get('app_guard_error'):
@@ -420,13 +431,46 @@ class StudyDock(QDockWidget):
             self.last_phase = phase
         self.run(lambda: bridge.helper('study-status'), updated)
 
+    def tick_display(self):
+        seconds = math.ceil(bridge.remaining_seconds(self.state))
+        self.timer_label.setText(f'{seconds // 60:02}:{seconds % 60:02}')
+
+    def selected_tasks(self):
+        return [task for task in self.tasks if task['occurrence_id'] in self.selected_ids]
+
+    def render_tasks(self, tasks, locked=False):
+        self.task_list.blockSignals(True)
+        self.task_list.clear()
+        for task in tasks:
+            item = QListWidgetItem(task['title'])
+            item.setToolTip(task['title'])
+            item.setData(Qt.ItemDataRole.UserRole, task.get('occurrence_id'))
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if locked or task.get('occurrence_id') in self.selected_ids else Qt.CheckState.Unchecked)
+            self.task_list.addItem(item)
+        self.task_list.blockSignals(False)
+        self.task_list.setFixedHeight(min(220, max(75, len(tasks) * 43 + 14)))
+        self.task_list.setVisible(bool(tasks))
+        self.task_list.setEnabled(not locked)
+        self.title.setVisible(not locked and not self.selected_ids)
+
+    def selection_changed(self, *_):
+        if self.busy or (self.state or {}).get('session'):
+            return
+        self.selected_ids = {self.task_list.item(i).data(Qt.ItemDataRole.UserRole)
+                             for i in range(self.task_list.count())
+                             if self.task_list.item(i).checkState() == Qt.CheckState.Checked}
+        self.title.setVisible(not self.selected_ids)
+        self.update_start_enabled()
+        update_home_widget()
+
     def filter_apps(self, text):
         for index in range(self.apps.count()):
             item = self.apps.item(index)
             item.setHidden(text.casefold() not in item.text().casefold())
 
     def update_start_enabled(self, *_):
-        self.start.setEnabled(bool(self.title.text().strip()) and not self.busy and
+        self.start.setEnabled(bool(self.selected_ids or self.title.text().strip()) and not self.busy and
                               bool(self.state) and not self.state.get('session') and
                               self.state.get('service_running', False))
 
@@ -445,10 +489,11 @@ class StudyDock(QDockWidget):
                 self.apps.item(index).setCheckState(state)
         self.update_app_summary()
 
-    def choose_task(self, index):
-        self.title.setVisible(index <= 0)
-        if 0 < index <= len(self.tasks):
-            self.title.setText(self.tasks[index - 1]['title'])
+    def toggle_task(self, index):
+        if self.busy or (self.state or {}).get('session') or not 0 <= index < len(self.tasks):
+            return
+        item = self.task_list.item(index)
+        item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
 
     def pair_slovo(self):
         token, ok = QInputDialog.getText(self, 'Подключить Слово', 'В Слове: Меню → Учёба в Anki → Создать ключ.\nВставь ключ:', QLineEdit.EchoMode.Password)
@@ -481,33 +526,29 @@ class StudyDock(QDockWidget):
         # A late network response must not replace the committed task UI.
         if self.state and self.state.get('session'):
             return
-        old_index = self.task_list.currentIndex() - 1
-        selected_id = self.tasks[old_index].get('occurrence_id') if 0 <= old_index < len(self.tasks) else None
         self.tasks = value['tasks']
         self.plan_date = value['date']
-        self.task_list.blockSignals(True)
-        self.task_list.clear()
-        self.task_list.addItem('Своя задача')
-        for task in self.tasks:
-            self.task_list.addItem(task['title'])
-        selected_index = next((i + 1 for i, task in enumerate(self.tasks) if selected_id and task.get('occurrence_id') == selected_id), 0)
-        self.task_list.setCurrentIndex(selected_index)
-        self.task_list.blockSignals(False)
-        self.choose_task(selected_index)
-        self.task_list.setVisible(bool(self.tasks))
+        self.selected_ids.intersection_update(task['occurrence_id'] for task in self.tasks)
+        self.render_tasks(self.tasks)
         self.pair.setText('Слово подключено')
-        self.message.setText(f'План на {value["date"]}: задач {len(self.tasks)}. Выбери одну и нужные приложения.')
+        self.message.setText(f'План на {value["date"]}: задач {len(self.tasks)}. Отметь нужные задачи и выбери приложения.')
+        self.update_start_enabled()
         update_home_widget()
 
     def start_block(self):
-        if self.busy or not self.title.text().strip():
+        if self.busy or (self.state or {}).get('session') or not (self.selected_ids or self.title.text().strip()):
             return
         apps = [self.apps.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.apps.count())
                 if self.apps.item(i).checkState() == Qt.CheckState.Checked]
-        task = {'title': self.title.text().strip()}
-        index = self.task_list.currentIndex()
-        if index > 0:
-            task.update({key: self.tasks[index - 1][key] for key in ('url', 'occurrence_id')})
+        selected = self.selected_tasks()
+        if len(selected) > 1 and not (self.state or {}).get('supports_task_groups'):
+            self.message.setText('Для нескольких задач нужно обновить системную службу: запусти repair-study.command из подготовленного пакета.')
+            return
+        try:
+            task = bridge.block_task(selected, self.title.text())
+        except ValueError as error:
+            self.message.setText(str(error))
+            return
         answer = QMessageBox.question(self, 'Начать блок?', '80 минут без изменения задачи и приложений. Затем обязательный перерыв 10 / 30 минут. Экстренный выход: причина, ожидание 60 секунд и подтверждение; один раз в день.\n\nПеред стартом сохрани документы и останови фоновую музыку, если она мешает.')
         if answer != QMessageBox.StandardButton.Yes:
             return
@@ -520,6 +561,9 @@ class StudyDock(QDockWidget):
         def started(value):
             self.busy = False
             if value is not None:
+                self.state = dict(self.state or {}, session=value)
+                self.tick_display()
+                update_home_widget()
                 self.message.setText('Условия блока зафиксированы системной службой.')
             self.poll()
         self.run(lambda: bridge.helper('study-start', {'task': task, 'apps': apps}), started)
@@ -684,7 +728,7 @@ HOME_SCRIPT = r'''
    #slovo-home-focus button {box-sizing:border-box;border:0;border-radius:10px;background:#e3bd7e;color:#132a35;padding:10px 12px;width:100%;font:inherit;font-size:12px;font-weight:600;margin-top:14px;cursor:pointer}
    #slovo-archive-link {order:999;margin:10px 20px;font-size:11px;color:inherit;opacity:.65;cursor:pointer;background:transparent;border:0;text-align:left}
   </style><div class="sf-top"><span class="sf-phase">ФОКУС</span><span class="sf-count">0 / 5</span></div>
-  <div class="sf-time">80:00</div><div class="sf-task">Один блок — одна задача</div>
+  <div class="sf-time">80:00</div><div class="sf-task">Выбери задачи для блока</div>
   <div class="sf-track"><div class="sf-fill"></div></div>
   <div class="sf-sub">80 мин учёбы · отдых 10 / 30 мин</div>
   <button type="button">Настроить блок →</button>`;
@@ -721,15 +765,17 @@ HOME_SCRIPT = r'''
     #slovo-home-tasks .st-task {display:flex;align-items:center;gap:12px;width:100%;box-sizing:border-box;background:#17384599;border:1px solid #49687470;border-radius:12px;padding:8px 10px;color:#d9e7e9;text-align:left;cursor:pointer;font:inherit;font-size:12px;line-height:1.45;flex-shrink:0}
     #slovo-home-tasks .st-task:hover {background:#2b505ed9;border-color:#c9b17c}
     #slovo-home-tasks .st-task:disabled {cursor:default;opacity:.65}
-    #slovo-home-tasks .st-num {color:#dfc38f;font-size:11px;flex:none;font-variant-numeric:tabular-nums}
+    #slovo-home-tasks .st-num {color:#dfc38f;font-size:13px;flex:none;border:1px solid #67828c;border-radius:4px;width:17px;height:17px;display:grid;place-items:center}
+    #slovo-home-tasks .st-task[aria-checked="true"] {border-color:#d2b67d;background:#294c57bb}
     #slovo-home-tasks .st-title {overflow-wrap:anywhere;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;flex:1}
     #slovo-home-tasks .st-arrow {color:#8eaeb8;flex:none}
     #slovo-home-tasks .st-note {font-size:11px;color:#9bb9c2;line-height:1.5}
     #slovo-home-tasks .st-empty {font-size:13px;color:#aec4cb;line-height:1.6;padding:8px 0}
    </style><div class="st-head"><div><div class="st-brand">СЛОВО · ПЛАН НА ДЕНЬ</div><h2>Задачи на сегодня</h2></div>
    <button class="st-refresh" type="button" aria-label="Обновить задачи" title="Обновить задачи">↻</button></div>
-   <div class="st-list"></div><div class="st-note"></div>`;
+   <div class="st-list"></div><div class="st-head"><div class="st-note"></div><button class="st-refresh st-setup" type="button" aria-label="Настроить выбранные задачи" title="Настроить блок">→</button></div>`;
    tasks.querySelector('.st-refresh').onclick = () => pycmd('slovo:refresh');
+   tasks.querySelector('.st-setup').onclick = () => pycmd('slovo:open');
    grid.appendChild(tasks);
   }
   // Fill the two free columns below Activity, immediately left of Stats.
@@ -737,15 +783,16 @@ HOME_SCRIPT = r'''
   tasks.style.gridArea = stats && Number(stats.style.gridColumnStart) > 1
    ? `${stats.style.gridRowStart} / 1 / span ${stats.style.gridRowEnd.replace('span ', '') || 2} / span ${Number(stats.style.gridColumnStart)-1}`
    : '5 / 1 / span 2 / span 2';
-  const key = JSON.stringify([s.tasks,s.active,s.connected,s.planBusy]);
+  const key = JSON.stringify([s.tasks,s.active,s.connected,s.planBusy,s.selected]);
   if (tasks._key !== key) {
    tasks._key = key;
    const list = tasks.querySelector('.st-list'); list.replaceChildren();
    s.tasks.forEach((task,i) => {
     const button = document.createElement('button'); button.type='button';button.className='st-task';button.disabled=s.active;button.title=task.title;
-    const num=document.createElement('span');num.className='st-num';num.textContent=String(i+1).padStart(2,'0');
+    button.setAttribute('role','checkbox');button.setAttribute('aria-checked',String(task.selected));
+    const num=document.createElement('span');num.className='st-num';num.textContent=task.selected?'✓':'';
     const title=document.createElement('span');title.className='st-title';title.textContent=task.title;
-    const arrow=document.createElement('span');arrow.className='st-arrow';arrow.textContent='↗';
+    const arrow=document.createElement('span');arrow.className='st-arrow';arrow.textContent='';
     button.append(num,title,arrow);button.onclick=()=>pycmd('slovo:task:'+i);list.appendChild(button);
    });
    if (!s.tasks.length) {
@@ -754,7 +801,7 @@ HOME_SCRIPT = r'''
     list.appendChild(empty);
    }
    tasks.querySelector('.st-refresh').disabled=s.active||s.planBusy;
-   tasks.querySelector('.st-note').textContent=s.active?'Блок идёт · задача зафиксирована':s.tasks.length?'Выбери задачу → настрой приложения → начни блок':'План обновляется автоматически';
+   tasks.querySelector('.st-note').textContent=s.active?'Блок идёт · задачи зафиксированы':s.tasks.length?(s.selected?'Выбрано: '+s.selected+' · настрой блок →':'Отметь одну или несколько задач'):'План обновляется автоматически';
   }
  }
  // Hide only the explicitly archived root. Newly created decks stay visible.
@@ -778,14 +825,19 @@ def update_home_widget(*_):
     state = dock.state if dock else None
     session = (state or {}).get('session')
     phase = (session or {}).get('phase', 'idle')
+    committed = (session or {}).get('task', {})
+    committed_items = committed.get('items', [committed] if committed else [])
+    chosen = {item.get('occurrence_id') for item in committed_items} if session else (dock.selected_ids if dock else set())
+    tasks = dock.tasks if dock and dock.tasks else committed_items
     payload = {
         'phase': {'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА'}[phase],
-        'remaining': (session or {}).get('remaining', 4800), 'active': bool(session),
+        'remaining': bridge.remaining_seconds(state), 'active': bool(session),
         'count': (state or {}).get('completed_today', 0),
-        'title': (session or {}).get('task', {}).get('title', 'Один блок — одна задача'),
+        'title': committed.get('title', f'Выбрано задач: {len(chosen)}' if chosen else 'Выбери задачи для блока'),
         'subtitle': ('80 мин учёбы · отдых 10 / 30 мин' if state else 'Проверяем системный таймер…'),
         'archive': str((mw.col.get_config('slovo_archive') or {}).get('deck_id', '')),
-        'tasks': [{'title': task['title']} for task in dock.tasks] if dock else [],
+        'tasks': [{'title': task['title'], 'selected': task.get('occurrence_id') in chosen} for task in tasks],
+        'selected': len(chosen),
         'connected': bool(dock and dock.preferences.get('token')),
         'planBusy': bool(dock and dock.plan_busy),
     }
@@ -807,8 +859,7 @@ def home_message(handled, message, context):
         dock = ensure_study()
         index = message.removeprefix('slovo:task:')
         if index.isdecimal() and 0 <= int(index) < len(dock.tasks) and not (dock.state or {}).get('session'):
-            dock.task_list.setCurrentIndex(int(index) + 1)
-            show_study()
+            dock.toggle_task(int(index))
         return True, None
     if message == 'slovo:archive':
         from aqt import dialogs

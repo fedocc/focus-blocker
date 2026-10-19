@@ -16,7 +16,7 @@ def build():
         for name in addon_files:
             archive.write(ROOT / 'anki_study' / name, name)
     release = destination / 'focus-study-macos.zip'
-    source_files = ['README.md', 'install.py', 'install-study.command', 'focus-helper',
+    source_files = ['README.md', 'install.py', 'install-study.command', 'repair-study.command', 'focus-helper',
                     'focus_open.py', 'focus_youtube_guard.py', 'focus_service_policy.py',
                     'focus_playlist_sync.py', 'focus_study.py', 'youtube-policy.json']
     source_files += [path.name for path in sorted(ROOT.glob('test_*.py'))]

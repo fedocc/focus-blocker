@@ -41,11 +41,14 @@ _BOOT = None
 def boot_identity():
     global _BOOT
     if _BOOT is None:
-        result = subprocess.run(['/usr/sbin/sysctl', '-n', 'kern.boottime'],
+        # Calendar boot time changes when macOS corrects its wall clock. A
+        # cached daemon and fresh command processes would then disagree and
+        # repeatedly rebase both the countdown and the emergency wait.
+        result = subprocess.run(['/usr/sbin/sysctl', '-n', 'kern.bootsessionuuid'],
                                 capture_output=True, text=True, timeout=3, check=True)
-        if not result.stdout.strip():
+        if not re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}', result.stdout.strip()):
             raise RuntimeError('Cannot identify the current system boot')
-        _BOOT = result.stdout.strip()
+        _BOOT = result.stdout.strip().lower()
     return _BOOT
 
 
@@ -539,7 +542,7 @@ def main():
         request = json.loads(sys.stdin.read(32768))
     with locked():
         if args == ['study-status']:
-            print(json.dumps(dict(study_status(), service_running=timer_running()), ensure_ascii=False))
+            print(json.dumps(dict(study_status(), service_running=timer_running(), supports_task_groups=True), ensure_ascii=False))
         elif args == ['study-start']:
             print(json.dumps(start_study(request), ensure_ascii=False))
         elif args == ['study-emergency-request']:
