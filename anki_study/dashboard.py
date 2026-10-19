@@ -8,7 +8,7 @@ from aqt import mw, gui_hooks
 from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDialog, QDialog, QFrame,
                     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QProgressBar,
                     QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl,
-                    QVBoxLayout, QWidget, QScrollArea, QToolButton)
+                    QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy)
 from . import bridge
 
 PREFS = Path(__file__).parent / 'user_files/preferences.json'
@@ -64,6 +64,8 @@ def label(text, name='muted'):
     widget = QLabel(text)
     widget.setObjectName(name)
     widget.setWordWrap(True)
+    widget.setMinimumWidth(0)
+    widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
     widget.setTextFormat(Qt.TextFormat.PlainText)
     return widget
 
@@ -152,12 +154,16 @@ class StudyDock(QDockWidget):
         super().__init__('Учебные блоки', mw)
         self.setObjectName('slovo-study-blocks')
         self.setMinimumWidth(355)
+        self.setMaximumWidth(420)
+        self.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
         self.setStyleSheet(STYLE)
         self.state = None
         self.busy = False
         self.polling = False
         self.plan_busy = False
         self.tasks = []
+        self.plan_date = ''
         self.last_phase = None
         self.last_plan_at = 0
         self.closed = False
@@ -224,6 +230,9 @@ class StudyDock(QDockWidget):
         self.task_card, task_layout = card(layout)
         task_layout.addWidget(label('01   Задача блока', 'sectionTitle'))
         self.task_list = QComboBox()
+        self.task_list.setMinimumContentsLength(12)
+        self.task_list.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.task_list.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.task_list.addItem('Своя задача')
         self.task_list.currentIndexChanged.connect(self.choose_task)
         self.task_list.hide()
@@ -297,6 +306,8 @@ class StudyDock(QDockWidget):
         self.message = Notice('')
         self.message.setObjectName('notice')
         self.message.setWordWrap(True)
+        self.message.setMinimumWidth(0)
+        self.message.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.message.setTextFormat(Qt.TextFormat.PlainText)
         self.message.hide()
         layout.addWidget(self.message)
@@ -456,11 +467,13 @@ class StudyDock(QDockWidget):
             self.message.setText('Подключи Слово один раз. До подключения можно ввести задачу вручную.')
             return
         self.plan_busy = True
+        update_home_widget()
         self.last_plan_at = time.monotonic()
         def loaded(value):
             self.plan_busy = False
             if value is not None:
                 self.apply_plan(value)
+            update_home_widget()
         self.run(lambda: bridge.plan(self.preferences['token']), loaded)
 
     def apply_plan(self, value):
@@ -468,6 +481,7 @@ class StudyDock(QDockWidget):
         if self.state and self.state.get('session'):
             return
         self.tasks = value['tasks']
+        self.plan_date = value['date']
         self.task_list.clear()
         self.task_list.addItem('Своя задача')
         for task in self.tasks:
@@ -475,6 +489,7 @@ class StudyDock(QDockWidget):
         self.task_list.setVisible(bool(self.tasks))
         self.pair.setText('Слово подключено')
         self.message.setText(f'План на {value["date"]}: задач {len(self.tasks)}. Выбери одну и нужные приложения.')
+        update_home_widget()
 
     def start_block(self):
         if self.busy or not self.title.text().strip():
@@ -535,12 +550,19 @@ class StudyDock(QDockWidget):
             self.grab().save(path, 'PNG')
 
 
-def show_study():
+def ensure_study():
     if not getattr(mw, '_slovo_study_dock', None):
         mw._slovo_study_dock = StudyDock()
         mw.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, mw._slovo_study_dock)
-    mw._slovo_study_dock.show()
-    mw._slovo_study_dock.raise_()
+        mw._slovo_study_dock.hide()
+    return mw._slovo_study_dock
+
+
+def show_study():
+    dock = ensure_study()
+    dock.show()
+    mw.resizeDocks([dock], [380], Qt.Orientation.Horizontal)
+    dock.raise_()
 
 
 def loaded():
@@ -556,7 +578,7 @@ def loaded():
     restore.triggered.connect(restore_decks)
     mw.form.menuTools.addAction(restore)
     mw._slovo_restore_action = restore
-    show_study()
+    ensure_study()
     if sys.platform == 'darwin':
         dock = mw._slovo_study_dock
         try:
@@ -648,6 +670,58 @@ HOME_SCRIPT = r'''
  el.querySelector('.sf-fill').style.width = Math.min(s.count/5*100,100)+'%';
  el.querySelector('.sf-sub').textContent = s.subtitle;
  el.querySelector('button').textContent = s.active ? 'Открыть управление →' : 'Настроить блок →';
+ const grid = document.querySelector('.unified-grid');
+ if (grid) {
+  let tasks = document.getElementById('slovo-home-tasks');
+  if (!tasks) {
+   tasks = document.createElement('section'); tasks.id = 'slovo-home-tasks';
+   tasks.innerHTML = `<style>
+    #slovo-home-tasks {min-width:0;min-height:0;box-sizing:border-box;border:1px solid #65838b80;border-radius:24px;padding:20px;
+     background:linear-gradient(135deg,#153846d9,#102a37cf);box-shadow:0 10px 28px #06192320;color:#dce9eb;text-align:left;display:flex;flex-direction:column;gap:14px;overflow:hidden}
+    #slovo-home-tasks .st-head {display:flex;align-items:center;justify-content:space-between;gap:10px}
+    #slovo-home-tasks .st-brand {font-size:10px;letter-spacing:2px;color:#dbbe88;margin-bottom:5px}
+    #slovo-home-tasks h2 {font-size:17px;font-weight:600;margin:0;color:#e2ecee}
+    #slovo-home-tasks .st-refresh {flex:none;background:#284b5866;color:#b8d0d4;border:1px solid #55768166;border-radius:10px;width:32px;height:32px;font-size:18px;cursor:pointer;padding:0}
+    #slovo-home-tasks .st-list {display:flex;flex-direction:column;gap:6px;overflow:auto;min-height:0;flex:1;scrollbar-width:thin}
+    #slovo-home-tasks .st-task {display:flex;align-items:center;gap:12px;width:100%;box-sizing:border-box;background:#17384599;border:1px solid #49687470;border-radius:12px;padding:8px 10px;color:#d9e7e9;text-align:left;cursor:pointer;font:inherit;font-size:12px;line-height:1.45;flex-shrink:0}
+    #slovo-home-tasks .st-task:hover {background:#2b505ed9;border-color:#c9b17c}
+    #slovo-home-tasks .st-task:disabled {cursor:default;opacity:.65}
+    #slovo-home-tasks .st-num {color:#dfc38f;font-size:11px;flex:none;font-variant-numeric:tabular-nums}
+    #slovo-home-tasks .st-title {overflow-wrap:anywhere;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;flex:1}
+    #slovo-home-tasks .st-arrow {color:#8eaeb8;flex:none}
+    #slovo-home-tasks .st-note {font-size:11px;color:#9bb9c2;line-height:1.5}
+    #slovo-home-tasks .st-empty {font-size:13px;color:#aec4cb;line-height:1.6;padding:8px 0}
+   </style><div class="st-head"><div><div class="st-brand">СЛОВО · ПЛАН НА ДЕНЬ</div><h2>Задачи на сегодня</h2></div>
+   <button class="st-refresh" type="button" aria-label="Обновить задачи" title="Обновить задачи">↻</button></div>
+   <div class="st-list"></div><div class="st-note"></div>`;
+   tasks.querySelector('.st-refresh').onclick = () => pycmd('slovo:refresh');
+   grid.appendChild(tasks);
+  }
+  // Fill the two free columns below Activity, immediately left of Stats.
+  const stats = grid.querySelector('.learner-stats-widget[data-widget-id="deck_stats"]')?.closest('.onigiri-widget-container');
+  tasks.style.gridArea = stats && Number(stats.style.gridColumnStart) > 1
+   ? `${stats.style.gridRowStart} / 1 / span ${stats.style.gridRowEnd.replace('span ', '') || 2} / span ${Number(stats.style.gridColumnStart)-1}`
+   : '5 / 1 / span 2 / span 2';
+  const key = JSON.stringify([s.tasks,s.active,s.connected,s.planBusy]);
+  if (tasks._key !== key) {
+   tasks._key = key;
+   const list = tasks.querySelector('.st-list'); list.replaceChildren();
+   s.tasks.forEach((task,i) => {
+    const button = document.createElement('button'); button.type='button';button.className='st-task';button.disabled=s.active;button.title=task.title;
+    const num=document.createElement('span');num.className='st-num';num.textContent=String(i+1).padStart(2,'0');
+    const title=document.createElement('span');title.className='st-title';title.textContent=task.title;
+    const arrow=document.createElement('span');arrow.className='st-arrow';arrow.textContent='↗';
+    button.append(num,title,arrow);button.onclick=()=>pycmd('slovo:task:'+i);list.appendChild(button);
+   });
+   if (!s.tasks.length) {
+    const empty=document.createElement('div');empty.className='st-empty';
+    empty.textContent=s.planBusy?'Загружаем план из Слова…':s.connected?'В плане пока нет задач. Добавь их в Слове и обнови список.':'Подключи Слово в настройках блока, чтобы видеть свой план здесь.';
+    list.appendChild(empty);
+   }
+   tasks.querySelector('.st-refresh').disabled=s.active||s.planBusy;
+   tasks.querySelector('.st-note').textContent=s.active?'Блок идёт · задача зафиксирована':s.tasks.length?'Выбери задачу → настрой приложения → начни блок':'План обновляется автоматически';
+  }
+ }
  // Hide only the explicitly archived root. Newly created decks stay visible.
  const archive = s.archive;
  if(archive) {
@@ -676,6 +750,9 @@ def update_home_widget(*_):
         'title': (session or {}).get('task', {}).get('title', 'Один блок — одна задача'),
         'subtitle': ('80 мин учёбы · отдых 10 / 30 мин' if state else 'Проверяем системный таймер…'),
         'archive': str((mw.col.get_config('slovo_archive') or {}).get('deck_id', '')),
+        'tasks': [{'title': task['title']} for task in dock.tasks] if dock else [],
+        'connected': bool(dock and dock.preferences.get('token')),
+        'planBusy': bool(dock and dock.plan_busy),
     }
     mw.deckBrowser.web.eval(HOME_SCRIPT.replace('PAYLOAD', json.dumps(payload, ensure_ascii=False)))
 
@@ -685,6 +762,18 @@ def home_message(handled, message, context):
         return handled
     if message == 'slovo:open':
         show_study()
+        return True, None
+    if message == 'slovo:refresh':
+        dock = ensure_study()
+        if not (dock.state or {}).get('session'):
+            dock.load_plan()
+        return True, None
+    if message.startswith('slovo:task:'):
+        dock = ensure_study()
+        index = message.removeprefix('slovo:task:')
+        if index.isdecimal() and 0 <= int(index) < len(dock.tasks) and not (dock.state or {}).get('session'):
+            dock.task_list.setCurrentIndex(int(index) + 1)
+            show_study()
         return True, None
     if message == 'slovo:archive':
         from aqt import dialogs
