@@ -4,20 +4,91 @@ import time
 from pathlib import Path
 
 from aqt import mw, gui_hooks
-from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDialog,
+from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDialog, QDialog, QFrame,
                     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QProgressBar,
                     QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl,
-                    QVBoxLayout, QWidget)
+                    QVBoxLayout, QWidget, QScrollArea, QToolButton)
 from . import bridge
 
 PREFS = Path(__file__).parent / 'user_files/preferences.json'
+
+STYLE = '''
+QDockWidget#slovo-study-blocks, QWidget#focusRoot, QWidget#focusHeader, QDialog#focusPicker {
+    background: #0e222d; color: #e3edf0; font-family: "SF Pro Text"; font-size: 13px;
+}
+QWidget#focusRoot QLabel, QWidget#focusHeader QLabel, QDialog#focusPicker QLabel { background: transparent; border: none; }
+QLabel#brand { color: #e8c58b; font-size: 15px; font-weight: 600; }
+QLabel#eyebrow { color: #89aaa9; font-size: 10px; font-weight: 600; letter-spacing: 2px; }
+QLabel#muted { color: #8ea8b4; font-size: 11px; }
+QLabel#sectionTitle { color: #dce8eb; font-size: 13px; font-weight: 600; }
+QLabel#phase { color: #d7b77d; font-size: 10px; font-weight: 600; letter-spacing: 2px; }
+QLabel#timer { color: #f0d29e; font-size: 64px; font-weight: 600; letter-spacing: -2px; }
+QLabel#taskHeading { color: #c9dbdf; font-size: 13px; }
+QLabel#notice { color: #c4d8da; background: #19323e; border: 1px solid #2a4b57; border-radius: 10px; padding: 10px; font-size: 11px; }
+QFrame#focusHero { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1c3d4d,stop:1 #112832); border: 1px solid #385661; border-radius: 20px; }
+QFrame#focusCard { background: #132b37; border: 1px solid #25424e; border-radius: 14px; }
+QWidget#focusRoot QLineEdit, QDialog#focusPicker QLineEdit, QWidget#focusRoot QComboBox {
+    background: #0e2430; color: #e2ebef; border: 1px solid #304c58; border-radius: 9px; padding: 10px; min-height: 18px; selection-background-color: #477275;
+}
+QWidget#focusRoot QLineEdit:focus, QDialog#focusPicker QLineEdit:focus { border-color: #b6a17b; }
+QWidget#focusRoot QComboBox::drop-down { border: none; width: 24px; }
+QWidget#focusRoot QComboBox QAbstractItemView { background: #17313e; color: #e2ebef; selection-background-color: #30535c; }
+QWidget#focusRoot QPushButton, QDialog#focusPicker QPushButton { color: #c4d9de; background: #1b3643; border: 1px solid #304c58; border-radius: 9px; padding: 9px 12px; min-height: 18px; font-weight: 500; }
+QWidget#focusRoot QPushButton:hover, QDialog#focusPicker QPushButton:hover { background: #254653; border-color: #52737a; }
+QWidget#focusRoot QPushButton#primary { background: #e3bd7e; color: #152934; border: none; border-radius: 12px; font-size: 14px; font-weight: 600; padding: 14px; }
+QWidget#focusRoot QPushButton#primary:hover { background: #f1d3a2; }
+QWidget#focusRoot QPushButton#primary:disabled { background: #314650; color: #8b9fa6; }
+QWidget#focusRoot QPushButton#quiet { background: transparent; border: none; color: #97b6bd; padding: 4px 0; font-size: 11px; }
+QWidget#focusRoot QPushButton#quiet:hover { color: #e9c98f; }
+QWidget#focusRoot QPushButton#emergency { background: transparent; border: none; color: #c39289; font-size: 11px; padding: 4px; }
+QWidget#focusRoot QPushButton:disabled, QWidget#focusRoot QLineEdit:disabled { color: #718a95; border-color: #213b47; }
+QToolButton { background: transparent; color: #8ca7b1; border: none; border-radius: 6px; padding: 4px; }
+QToolButton:hover { background: #27414d; color: #e5c38d; }
+QProgressBar { background: #223e49; border: none; border-radius: 3px; }
+QProgressBar::chunk { background: #d9ba82; border-radius: 3px; }
+QScrollArea { background: transparent; border: none; }
+QScrollBar:vertical { background: transparent; width: 5px; margin: 0; }
+QScrollBar::handle:vertical { background: #35515c; border-radius: 2px; min-height: 32px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QDialog#focusPicker QListWidget { background: #102934; color: #dbe7eb; border: 1px solid #294550; border-radius: 12px; outline: none; padding: 6px; }
+QDialog#focusPicker QListWidget::item { padding: 10px; border-radius: 7px; }
+QDialog#focusPicker QListWidget::item:hover { background: #203f4c; }
+QDialog#focusPicker QListWidget::item:selected { background: #2b4c56; }
+QDialog#focusPicker QListWidget::indicator { width: 17px; height: 17px; }
+'''
+
+
+def label(text, name='muted'):
+    widget = QLabel(text)
+    widget.setObjectName(name)
+    widget.setWordWrap(True)
+    widget.setTextFormat(Qt.TextFormat.PlainText)
+    return widget
+
+
+def card(parent_layout, name='focusCard'):
+    frame = QFrame()
+    frame.setObjectName(name)
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(16, 15, 16, 15)
+    layout.setSpacing(10)
+    parent_layout.addWidget(frame)
+    return frame, layout
+
+
+class Notice(QLabel):
+    def setText(self, text):
+        super().setText(text)
+        self.setVisible(bool(text))
 
 
 class StudyDock(QDockWidget):
     def __init__(self):
         super().__init__('Учебные блоки', mw)
         self.setObjectName('slovo-study-blocks')
-        self.setMinimumWidth(305)
+        self.setMinimumWidth(355)
+        self.setStyleSheet(STYLE)
         self.state = None
         self.busy = False
         self.polling = False
@@ -30,72 +101,172 @@ class StudyDock(QDockWidget):
             self.preferences = json.loads(PREFS.read_text())
         except (OSError, ValueError):
             self.preferences = {}
+        header = QWidget()
+        header.setObjectName('focusHeader')
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(20, 12, 14, 6)
+        header_layout.addWidget(label('◉  Фокус', 'brand'))
+        header_layout.addStretch()
+        close = QToolButton()
+        close.setText('×')
+        close.setAccessibleName('Скрыть панель фокуса')
+        close.clicked.connect(self.hide)
+        header_layout.addWidget(close)
+        self.setTitleBarWidget(header)
+        shell = QWidget()
+        shell.setObjectName('focusRoot')
+        self.setWidget(shell)
+        outer = QVBoxLayout(shell)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
         body = QWidget()
-        self.setWidget(body)
+        body.setObjectName('focusRoot')
+        scroll.setWidget(body)
         layout = QVBoxLayout(body)
-        self.heading = QLabel('Пять основных блоков · шестой по желанию')
-        self.heading.setTextFormat(Qt.TextFormat.PlainText)
-        self.heading.setWordWrap(True)
-        layout.addWidget(self.heading)
-        self.timer_label = QLabel('80:00')
-        self.timer_label.setStyleSheet('font-size:40px;font-weight:700;color:#caa65c;padding:12px 0;')
-        layout.addWidget(self.timer_label)
-        self.progress = QLabel('Подключаем системный таймер…')
-        self.progress.setTextFormat(Qt.TextFormat.PlainText)
-        self.progress.setWordWrap(True)
-        layout.addWidget(self.progress)
+        layout.setContentsMargins(18, 12, 18, 16)
+        layout.setSpacing(14)
+        _, hero = card(layout, 'focusHero')
+        hero.setContentsMargins(16, 20, 16, 20)
+        hero.setSpacing(4)
+        self.phase_tag = label('ГОТОВ К СТАРТУ', 'phase')
+        self.phase_tag.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero.addWidget(self.phase_tag)
+        self.timer_label = label('80:00', 'timer')
+        self.timer_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero.addWidget(self.timer_label)
+        self.heading = label('Один блок — одна задача', 'taskHeading')
+        self.heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.heading.setMaximumHeight(56)
+        hero.addWidget(self.heading)
+        cycle = label('80 мин фокуса  ·  10 / 30 мин отдыха')
+        cycle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero.addWidget(cycle)
+        day_row = QHBoxLayout()
+        day_row.addWidget(label('ТВОЙ ДЕНЬ', 'eyebrow'))
+        self.day_count = label('0 / 5', 'sectionTitle')
+        day_row.addStretch()
+        day_row.addWidget(self.day_count)
+        layout.addLayout(day_row)
         self.day_progress = QProgressBar()
         self.day_progress.setRange(0, 6)
-        self.day_progress.setFormat('%v блоков · цель 5 + 1')
+        self.day_progress.setTextVisible(False)
+        self.day_progress.setFixedHeight(6)
         layout.addWidget(self.day_progress)
+        self.progress = label('Пять основных блоков. Шестой — по желанию.')
+        layout.addWidget(self.progress)
+        self.task_card, task_layout = card(layout)
+        task_layout.addWidget(label('01   Задача блока', 'sectionTitle'))
         self.task_list = QComboBox()
         self.task_list.addItem('Своя задача')
         self.task_list.currentIndexChanged.connect(self.choose_task)
-        layout.addWidget(self.task_list)
+        self.task_list.hide()
+        task_layout.addWidget(self.task_list)
         self.title = QLineEdit()
-        self.title.setPlaceholderText('Что получится за этот блок?')
+        self.title.setPlaceholderText('Лекция по DL + конспект…')
+        self.title.setAccessibleName('Результат учебного блока')
         self.title.setMaxLength(300)
-        layout.addWidget(self.title)
+        task_layout.addWidget(self.title)
         row = QHBoxLayout()
-        self.refresh = QPushButton('Обновить план')
+        self.refresh = QPushButton('↻  Обновить план')
+        self.refresh.setObjectName('quiet')
         self.refresh.clicked.connect(self.load_plan)
         self.pair = QPushButton('Подключить Слово')
+        self.pair.setObjectName('quiet')
         self.pair.clicked.connect(self.pair_slovo)
         row.addWidget(self.refresh)
+        row.addStretch()
         row.addWidget(self.pair)
-        layout.addLayout(row)
+        task_layout.addLayout(row)
+        _, apps_layout = card(layout)
+        apps_title = QHBoxLayout()
+        apps_title.addWidget(label('02   Приложения', 'sectionTitle'))
+        apps_title.addStretch()
+        self.app_count = label('1 выбрано')
+        apps_title.addWidget(self.app_count)
+        apps_layout.addLayout(apps_title)
+        self.app_summary = label('Arc', 'taskHeading')
+        apps_layout.addWidget(self.app_summary)
+        self.app_picker_button = QPushButton('Выбрать приложения  →')
+        self.app_picker_button.clicked.connect(self.pick_apps)
+        apps_layout.addWidget(self.app_picker_button)
+        apps_layout.addWidget(label('Anki и Фото доступны всегда'))
+        self.picker = QDialog(self)
+        self.picker.setObjectName('focusPicker')
+        self.picker.setWindowTitle('Приложения для блока')
+        self.picker.setStyleSheet(STYLE)
+        self.picker.resize(420, 560)
+        picker_layout = QVBoxLayout(self.picker)
+        picker_layout.setContentsMargins(22, 22, 22, 22)
+        picker_layout.setSpacing(14)
+        picker_layout.addWidget(label('Что понадобится для учёбы?', 'sectionTitle'))
+        picker_layout.addWidget(label('Выбери до старта. Твой выбор сохранится для следующего блока.'))
         self.search = QLineEdit()
-        self.search.setPlaceholderText('Поиск приложений для этого блока')
+        self.search.setPlaceholderText('Поиск приложений…')
         self.search.textChanged.connect(self.filter_apps)
-        layout.addWidget(self.search)
+        picker_layout.addWidget(self.search)
         self.apps = QListWidget()
         selected = self.preferences.get('apps', ['company.thebrowser.Browser'])
+        permanent = {'net.ankiweb.anki', 'com.apple.Photos', 'com.apple.finder', 'com.apple.systempreferences'}
         for bundle, name in bridge.applications():
-            item = QListWidgetItem(f'{name} · {bundle}')
+            if bundle in permanent:
+                continue
+            item = QListWidgetItem(name)
+            item.setToolTip(name)
             item.setData(Qt.ItemDataRole.UserRole, bundle)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Checked if bundle in selected else Qt.CheckState.Unchecked)
             self.apps.addItem(item)
-        layout.addWidget(self.apps)
-        note = QLabel('Anki, Фото и системные окна доступны всегда. Лишние приложения скрываются без закрытия документов. Документация и поиск доступны в выбранном браузере; лекции — по существующему белому списку.')
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        self.start = QPushButton('Зафиксировать и начать · 80 минут')
-        self.start.clicked.connect(self.start_block)
-        layout.addWidget(self.start)
-        self.emergency = QPushButton('Экстренно прервать…')
-        self.emergency.clicked.connect(self.request_emergency)
-        layout.addWidget(self.emergency)
-        self.proof = QPushButton('Слово: приложить результат')
-        self.proof.clicked.connect(self.open_slovo)
-        layout.addWidget(self.proof)
-        self.receipt = QPushButton('Сохранить снимок фокуса')
-        self.receipt.clicked.connect(self.save_receipt)
-        layout.addWidget(self.receipt)
-        self.message = QLabel('')
+        picker_layout.addWidget(self.apps)
+        picker_layout.addWidget(label('Anki, Фото и системные окна остаются доступны. Остальные приложения скрываются без закрытия документов.'))
+        picker_actions = QHBoxLayout()
+        cancel = QPushButton('Отмена')
+        cancel.clicked.connect(self.picker.reject)
+        done = QPushButton('Готово')
+        done.clicked.connect(self.picker.accept)
+        picker_actions.addWidget(cancel)
+        picker_actions.addWidget(done)
+        picker_layout.addLayout(picker_actions)
+        self.update_app_summary()
+        self.message = Notice('')
+        self.message.setObjectName('notice')
         self.message.setWordWrap(True)
         self.message.setTextFormat(Qt.TextFormat.PlainText)
+        self.message.hide()
         layout.addWidget(self.message)
+        layout.addStretch()
+        footer = QWidget()
+        footer.setObjectName('focusRoot')
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(18, 8, 18, 18)
+        footer_layout.setSpacing(8)
+        outer.addWidget(footer)
+        self.start = QPushButton('Начать блок   →')
+        self.start.setObjectName('primary')
+        self.start.clicked.connect(self.start_block)
+        self.title.textChanged.connect(self.update_start_enabled)
+        footer_layout.addWidget(self.start)
+        lock_note = label('80 минут. После старта настройки фиксируются.')
+        lock_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        footer_layout.addWidget(lock_note)
+        self.emergency = QPushButton('Экстренно прервать…')
+        self.emergency.setObjectName('emergency')
+        self.emergency.clicked.connect(self.request_emergency)
+        self.emergency.hide()
+        footer_layout.addWidget(self.emergency)
+        result_row = QHBoxLayout()
+        self.proof = QPushButton('↗  Результат в Слове')
+        self.proof.setObjectName('quiet')
+        self.proof.clicked.connect(self.open_slovo)
+        result_row.addWidget(self.proof)
+        result_row.addStretch()
+        self.receipt = QPushButton('Снимок фокуса')
+        self.receipt.setObjectName('quiet')
+        self.receipt.clicked.connect(self.save_receipt)
+        result_row.addWidget(self.receipt)
+        footer_layout.addLayout(result_row)
         self.title.setEnabled(False)
         self.start.setEnabled(False)
         self.emergency.setEnabled(False)
@@ -133,23 +304,26 @@ class StudyDock(QDockWidget):
             session = value['session']
             phase = session['phase'] if session else 'idle'
             locked = bool(session)
-            for control in (self.title, self.task_list, self.apps, self.refresh, self.pair):
+            for control in (self.title, self.task_list, self.apps, self.refresh, self.pair, self.app_picker_button):
                 control.setEnabled(not locked)
-            self.start.setEnabled(not locked and value.get('service_running', False))
+            self.update_start_enabled()
             self.emergency.setEnabled(phase == 'focus' and value['emergency_available'])
+            self.emergency.setVisible(phase == 'focus')
+            self.phase_tag.setText({'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА'}[phase])
+            self.start.setText({'idle': 'Начать блок   →', 'focus': 'Блок идёт · настройки закрыты', 'break': 'Сначала восстановись'}[phase])
             seconds = round(session['remaining']) if session else 4800
             self.timer_label.setText(f'{seconds // 60:02}:{seconds % 60:02}')
             count = value['completed_today']
             self.day_progress.setValue(min(count, 6))
+            self.day_count.setText(f'{count} / 5')
             attempts = sum(session.get('attempts', {}).values()) + sum(session.get('app_attempts', {}).values()) if session else 0
-            self.progress.setText(f'Сегодня: {count}/5 · шестой по желанию\n' +
-                                  ('Отдых. Следующий блок после перерыва.' if phase == 'break' else
-                                   f'Блок зафиксирован · срабатываний: {attempts}' if phase == 'focus' else 'Можно подготовить следующий блок.') +
-                                  f'\nЗа день срабатываний: {value.get("attempts_today", 0)}')
+            self.progress.setText(('Перерыв перед следующим блоком.' if phase == 'break' else
+                                   f'Настройки зафиксированы · блокировок: {attempts}' if phase == 'focus' else 'Пять основных блоков. Шестой — по желанию.') +
+                                  f'\nСрабатываний за день: {value.get("attempts_today", 0)}')
             if session:
                 self.heading.setText(session['task']['title'])
             else:
-                self.heading.setText('Пять основных блоков · шестой по желанию')
+                self.heading.setText('Один блок — одна задача')
             if not value.get('service_running', False):
                 self.message.setText('Системная служба не запущена. Блокировка не подтверждена; новые блоки закрыты.')
             elif session and session.get('app_guard_error'):
@@ -168,6 +342,26 @@ class StudyDock(QDockWidget):
         for index in range(self.apps.count()):
             item = self.apps.item(index)
             item.setHidden(text.casefold() not in item.text().casefold())
+
+    def update_start_enabled(self, *_):
+        self.start.setEnabled(bool(self.title.text().strip()) and not self.busy and
+                              bool(self.state) and not self.state.get('session') and
+                              self.state.get('service_running', False))
+
+    def update_app_summary(self):
+        names = [self.apps.item(i).text() for i in range(self.apps.count())
+                 if self.apps.item(i).checkState() == Qt.CheckState.Checked]
+        self.app_summary.setText(' · '.join(names[:3]) + (f'  +{len(names)-3}' if len(names) > 3 else '') if names else 'Только Anki и всегда доступные приложения')
+        self.app_summary.setToolTip(', '.join(names))
+        self.app_count.setText(f'Выбрано: {len(names)}')
+
+    def pick_apps(self):
+        previous = [self.apps.item(i).checkState() for i in range(self.apps.count())]
+        self.search.clear()
+        if self.picker.exec() != QDialog.DialogCode.Accepted:
+            for index, state in enumerate(previous):
+                self.apps.item(index).setCheckState(state)
+        self.update_app_summary()
 
     def choose_task(self, index):
         if 0 < index <= len(self.tasks):
@@ -207,6 +401,8 @@ class StudyDock(QDockWidget):
         self.task_list.addItem('Своя задача')
         for task in self.tasks:
             self.task_list.addItem(task['title'])
+        self.task_list.setVisible(bool(self.tasks))
+        self.pair.setText('Слово подключено')
         self.message.setText(f'План на {value["date"]}: задач {len(self.tasks)}. Выбери одну и нужные приложения.')
 
     def start_block(self):
@@ -225,7 +421,7 @@ class StudyDock(QDockWidget):
         bridge.save_preferences(PREFS, self.preferences)
         self.busy = True
         self.start.setEnabled(False)
-        for control in (self.title, self.task_list, self.apps, self.refresh, self.pair):
+        for control in (self.title, self.task_list, self.apps, self.refresh, self.pair, self.app_picker_button):
             control.setEnabled(False)
         def started(value):
             self.busy = False
