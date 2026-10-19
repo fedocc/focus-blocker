@@ -143,7 +143,8 @@ def applications(roots=None):
                 if not isinstance(bundle, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{2,199}', bundle):
                     continue
                 name = info.get('CFBundleDisplayName') or info.get('CFBundleName')
-                found[bundle] = name if isinstance(name, str) and name.strip() else path.stem
+                found[bundle] = ('Visual Studio Code' if bundle == 'com.microsoft.VSCode' else
+                                 name if isinstance(name, str) and name.strip() else path.stem)
             except (OSError, ValueError, plistlib.InvalidFileException, ExpatError):
                 continue
     return sorted(found.items(), key=lambda entry: entry[1].casefold())

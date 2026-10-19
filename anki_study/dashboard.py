@@ -465,9 +465,14 @@ class StudyDock(QDockWidget):
         update_home_widget()
 
     def filter_apps(self, text):
+        query = ''.join(text.casefold().split())
         for index in range(self.apps.count()):
             item = self.apps.item(index)
-            item.setHidden(text.casefold() not in item.text().casefold())
+            bundle = item.data(Qt.ItemDataRole.UserRole)
+            names = item.text() + ' ' + bundle
+            if bundle == 'com.microsoft.VSCode':
+                names += ' VS Code vscode Code Visual Studio'
+            item.setHidden(query not in ''.join(names.casefold().split()))
 
     def update_start_enabled(self, *_):
         self.start.setEnabled(bool(self.selected_ids or self.title.text().strip()) and not self.busy and
