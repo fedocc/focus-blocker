@@ -1,5 +1,10 @@
 # Focus Blocker
 
+**Новая установка другу на Mac:** начни с [START_HERE.md](START_HERE.md).
+Полный комплект включает Anki, план из [Слова](https://github.com/fedocc/slovo),
+наше оформление и статистику фокуса. [Инструкция для Codex](CODEX_SETUP.md).
+Подготовка под собственный адрес: `python3 prepare_friend.py --slovo-origin https://YOUR-SLOVO-DOMAIN`.
+
 Локальный блокировщик YouTube, Instagram, X, Telegram Web и VK Видео для macOS. Доступ контролируют защищённая системная служба, блоки `FOCUS_BLOCK` в `/etc/hosts` и наблюдение за адресами вкладок. Расширение браузера не требуется.
 
 ## Учебные блоки и Anki
