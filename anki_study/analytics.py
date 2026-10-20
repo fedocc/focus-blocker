@@ -2,6 +2,7 @@
 import datetime as dt
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -76,19 +77,22 @@ def snapshot(state, usage=None, now=None, remaining=None, overtime=None):
 
 
 class UsageTracker:
-    """Aggregate five-second foreground samples locally, never window contents."""
+    """Aggregate foreground time and optional sanitized metadata, locally."""
     def __init__(self, path):
         path = Path(path)
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.db = sqlite3.connect(path, timeout=.1)
         os.chmod(path, 0o600)
         self.db.execute('CREATE TABLE IF NOT EXISTS usage (day TEXT, app TEXT, name TEXT, seconds REAL, PRIMARY KEY(day,app))')
+        self.db.execute('CREATE TABLE IF NOT EXISTS usage_details (day TEXT, app TEXT, kind TEXT, context_id TEXT, group_name TEXT, name TEXT, seconds REAL, PRIMARY KEY(day,app,kind,context_id))')
         self.db.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)')
         self.db.execute('CREATE TABLE IF NOT EXISTS blocks (id TEXT PRIMARY KEY, record TEXT)')
         self.db.execute('INSERT OR IGNORE INTO meta VALUES (?,?)', ('since', str(time.time())))
         self.db.commit()
         self.previous = None
+        self.context_previous = None
         self.pending = {}
+        self.pending_details = {}
         self.last_flush = time.monotonic()
         self.blocks = {key: json.loads(record) for key, record in self.db.execute('SELECT * FROM blocks')}
 
@@ -110,7 +114,9 @@ class UsageTracker:
             with self.db:
                 self.db.executemany('INSERT OR IGNORE INTO blocks VALUES (?,?)', changed)
 
-    def sample(self, state, app, now, mono, fresh=True):
+    def sample(self, state, app, now, mono, fresh=True, detail=None, defer_detail=False):
+        if not defer_detail:
+            self.sample_detail(state, app, now, mono, fresh=fresh, detail=detail)
         session = (state or {}).get('session') or {}
         current = None
         if fresh and session.get('phase') == 'focus' and app and (session.get('remaining', 0) > 0 or session.get('awaiting_rest')):
@@ -128,12 +134,41 @@ class UsageTracker:
         if mono - self.last_flush >= 30:
             self.flush()
 
+    def sample_detail(self, state, app, now, mono, fresh=True, detail=None):
+        """Metadata may finish asynchronously; app totals never wait for it."""
+        session = (state or {}).get('session') or {}
+        prev = self.context_previous
+        if prev and mono <= prev[4]:
+            return  # An older worker cannot rewrite the newest observation.
+        valid = (isinstance(detail, dict) and detail.get('kind') in ('site', 'window', 'private') and
+                 isinstance(detail.get('key'), str) and re.fullmatch(r'[a-f0-9]{32}', detail['key']) and
+                 all(isinstance(detail.get(key), str) and 1 <= len(detail[key]) <= 180 for key in ('group', 'name')))
+        current = None
+        if fresh and valid and app and session.get('phase') == 'focus' and (session.get('remaining', 0) > 0 or session.get('awaiting_rest')):
+            current = (session['id'], app[0], app[1], now, mono, detail)
+        self.context_previous = current
+        if not current or not prev or current[:2] != prev[:2] or (detail['kind'], detail['key']) != (prev[5]['kind'], prev[5]['key']):
+            return
+        elapsed = mono - prev[4]
+        if not 0 < elapsed <= 10 or abs((now - prev[3]) - elapsed) > 2:
+            return
+        for key, seconds in intervals(now, elapsed):
+            bucket = self.pending_details.setdefault((key, app[0], detail['kind'], detail['key']),
+                                                      [detail['group'], detail['name'], 0])
+            bucket[:2] = [detail['group'], detail['name']]
+            bucket[2] += seconds
+
     def flush(self):
         if self.pending:
             with self.db:
                 self.db.executemany('INSERT INTO usage VALUES (?,?,?,?) ON CONFLICT(day,app) DO UPDATE SET seconds=seconds+excluded.seconds,name=excluded.name',
                                     [(key, app, name, seconds) for (key, app), (name, seconds) in self.pending.items()])
             self.pending.clear()
+        if self.pending_details:
+            with self.db:
+                self.db.executemany('INSERT INTO usage_details VALUES (?,?,?,?,?,?,?) ON CONFLICT(day,app,kind,context_id) DO UPDATE SET seconds=seconds+excluded.seconds,name=excluded.name,group_name=excluded.group_name',
+                                    [(*key, group, name, seconds) for key, (group, name, seconds) in self.pending_details.items()])
+            self.pending_details.clear()
         self.last_flush = time.monotonic()
 
     def summary(self):
@@ -143,6 +178,13 @@ class UsageTracker:
         for (key, app), (name, seconds) in self.pending.items():
             bucket = result.setdefault(key, {}).setdefault(app, {'name': name, 'seconds': 0})
             bucket['seconds'] += seconds
+        for key, app, kind, identity, group, name, seconds in self.db.execute('SELECT * FROM usage_details'):
+            if app in result.get(key, {}):
+                result[key][app].setdefault('details', {})[kind + ':' + identity] = {'kind': kind, 'group': group, 'name': name, 'seconds': seconds}
+        for (key, app, kind, identity), (group, name, seconds) in self.pending_details.items():
+            bucket = result[key][app].setdefault('details', {}).setdefault(kind + ':' + identity,
+                     {'kind': kind, 'group': group, 'name': name, 'seconds': 0})
+            bucket.update(group=group, name=name, seconds=bucket['seconds'] + seconds)
         return {'since': float(self.db.execute('SELECT value FROM meta WHERE key=?', ('since',)).fetchone()[0]), 'days': result}
 
     def close(self):
@@ -183,3 +225,9 @@ class MacForeground:
             return None
         name = 'Visual Studio Code' if bundle == 'com.microsoft.VSCode' else self.text(self.call(app, 'localizedName'))
         return bundle, name or bundle
+
+    def pid(self):
+        workspace = self.call(self.objc.objc_getClass(b'NSWorkspace'), 'sharedWorkspace')
+        app = self.call(workspace, 'frontmostApplication')
+        send = self.c.CFUNCTYPE(self.c.c_int32, self.c.c_void_p, self.c.c_void_p)(self.c.cast(self.objc.objc_msgSend, self.c.c_void_p).value)
+        return send(app, self.objc.sel_registerName(b'processIdentifier')) if app else 0

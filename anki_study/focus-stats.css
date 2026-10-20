@@ -39,10 +39,28 @@ html[data-slovo-mode=focus] .slovo-focus-replacement {display:flex}
 .ss-tabs {display:flex;gap:14px;border-bottom:1px solid #64808b45;flex:none}
 .ss-tabs button {font:inherit;font-size:11px;background:none;border:0;border-bottom:2px solid transparent;padding:0 0 8px;color:#9bb6c1;cursor:pointer}
 .ss-tabs button[aria-selected=true] {color:#e9ce9f;border-bottom-color:#d6b87e}
-.ss-detail-body {flex:1;min-height:0;overflow:auto;scrollbar-width:thin}
+.ss-detail-body {flex:1;min-height:0;min-width:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .ss-usage-row {margin:11px 0}
 .ss-usage-head {display:flex;justify-content:space-between;gap:10px;font-size:11px;margin-bottom:6px}
 .ss-usage-head span:first-child {overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ss-app-usage {min-width:0;margin:13px 0;color:inherit}
+.ss-app-usage summary {list-style:none;cursor:pointer;outline-offset:3px}
+.ss-app-usage summary::-webkit-details-marker {display:none}
+.ss-app-usage > summary {margin-bottom:7px}
+.ss-app-title {display:flex;gap:8px;align-items:center;min-width:0;overflow:hidden}
+.ss-app-title > span {overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ss-chevron {flex:none;font-size:17px;line-height:14px;font-style:normal;transition:transform .15s;color:#d9bf8f}
+details[open] > summary .ss-chevron {transform:rotate(90deg)}
+.ss-usage-time {flex:none;white-space:nowrap;color:#acc9cf;font-variant-numeric:tabular-nums}
+.ss-usage-children {padding:8px 0 3px 16px;min-width:0;border-left:1px solid #6d919755;margin:8px 0 0 5px}
+.ss-site-usage {padding:6px 0;min-width:0}
+.ss-site-usage > summary {font-size:11px;gap:8px}
+.ss-page-list {padding-left:15px}
+.ss-usage-item {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start;padding:6px 0;font-size:11px;line-height:1.5}
+.ss-usage-item > span:first-child {white-space:normal;overflow-wrap:anywhere;color:#c7dde2;min-width:0}
+.ss-usage-group-title,.ss-usage-note {font-size:10px;line-height:1.5;margin:6px 0;color:#96b4bf}
+.ss-unassigned {opacity:.7}
+.ss-detail-settings {box-sizing:border-box;display:block;margin:12px 0!important;padding:7px 0!important;background:transparent!important;border:0!important;color:#dfc18c!important;font:inherit;font-size:11px;cursor:pointer;text-align:left;white-space:normal}
 .ss-track {height:5px;background:#45616b50;border-radius:3px;overflow:hidden}
 .ss-track div {height:100%;background:linear-gradient(90deg,#429b9d,#75ccb8);border-radius:3px}
 .ss-summary-grid {display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}

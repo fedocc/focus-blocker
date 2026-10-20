@@ -11,7 +11,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent
 ORIGINAL_ORIGIN = 'https://slovo.45-80-228-215.sslip.io'
-ADDON_FILES = ('__init__.py', 'bridge.py', 'dashboard.py', 'analytics.py',
+ADDON_FILES = ('__init__.py', 'bridge.py', 'dashboard.py', 'analytics.py', 'activity_detail.py',
                'focus-stats.js', 'focus-stats.css', 'manifest.json') + tuple(
                    'wallpaper-' + scene + '.png' for scene in ('dawn', 'day', 'evening', 'night')) + tuple(
                    f'wallpaper-{theme}-{scene}.png'

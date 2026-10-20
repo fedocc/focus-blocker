@@ -7,7 +7,7 @@
  if(window.slovoFocusStats?.grid===grid&&window.slovoFocusStats.alive()){window.slovoFocusStats.update(PAYLOAD);return;}
  document.getElementById('slovo-stats-switch')?.remove();
  grid.querySelectorAll('.slovo-focus-replacement').forEach(el=>el.remove());
- const model={data:PAYLOAD,mode:PAYLOAD.mode||'focus',period:'today',view:'year',tab:'apps',selected:null};
+ const model={data:PAYLOAD,mode:PAYLOAD.mode||'focus',period:'today',view:'year',tab:'apps',selected:null,expanded:new Set(),detailScroll:{}};
  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const fmt=s=>s>=3600?Math.floor(s/3600)+' ч'+(Math.floor(s%3600/60)?' '+Math.floor(s%3600/60)+' мин':''):Math.floor(s/60)+' мин';
  const date=n=>new Date(n+'T12:00:00+03:00');
@@ -119,23 +119,70 @@
    firstYear:Number((Object.keys(calendar).sort()[0]||model.data.today).slice(0,4))},config);
   decorateCalendar();
  }
+ function aggregateUsage(days,accept){
+  const apps={};
+  Object.entries(days||{}).sort(([a],[b])=>a.localeCompare(b)).filter(([key])=>accept(key)).forEach(([,day])=>{
+   Object.entries(day).forEach(([id,row])=>{
+    const app=apps[id]??={id,name:row.name,seconds:0,details:{}};app.seconds+=row.seconds;
+    Object.entries(row.details||{}).forEach(([key,item])=>{
+     const detail=app.details[key]??={...item,seconds:0};
+     detail.name=item.name;detail.group=item.group;detail.seconds+=item.seconds;
+    });
+   });
+  });
+  return Object.values(apps).sort((a,b)=>b.seconds-a.seconds||a.name.localeCompare(b.name));
+ }
+ function usageGroups(row){
+  const groups={};
+  Object.entries(row.details).forEach(([id,item])=>{
+   const key=item.kind+':'+item.group;
+   const group=groups[key]??={key,name:item.group,kind:item.kind,seconds:0,items:[]};
+   group.seconds+=item.seconds;group.items.push({...item,id});
+  });
+  return Object.values(groups).sort((a,b)=>b.seconds-a.seconds);
+ }
+ const usageFmt=s=>s<60?Math.floor(s)+' с':fmt(s);
+ function usageMarkup(row,total){
+  const groups=usageGroups(row),known=groups.reduce((sum,g)=>sum+g.seconds,0);
+  const itemMarkup=item=>`<div class="ss-usage-item"><span title="${esc(item.name)}">${esc(item.name)}</span><span class="ss-usage-time">${usageFmt(item.seconds)}</span></div>`;
+  const content=groups.map(group=>{
+   if(group.kind!=='site')return `<div class="ss-usage-group-title">${esc(group.name)}</div>`+group.items.sort((a,b)=>b.seconds-a.seconds).map(itemMarkup).join('');
+   const key=row.id+'|'+group.key;
+   return `<details class="ss-site-usage" data-expand="${esc(key)}"${model.expanded.has(key)?' open':''}><summary class="ss-usage-head"><span class="ss-app-title"><i class="ss-chevron" aria-hidden="true">›</i>${esc(group.name)}</span><span class="ss-usage-time">${usageFmt(group.seconds)}</span></summary><div class="ss-page-list">${group.items.sort((a,b)=>b.seconds-a.seconds).map(itemMarkup).join('')}</div></details>`;
+  }).join('');
+  const status=model.data.detail_status?.[row.id];
+  const supported=(model.data.detail_supported||[]).includes(row.id);
+  const note=model.data.detail_messages?.[status]||(!supported?'Для этого приложения учитывается общее время.':'Подробности появятся в новых блоках после разрешения доступа.');
+  const unknown=Math.max(0,row.seconds-known);
+  return `<details class="ss-app-usage" data-expand="${esc(row.id)}"${model.expanded.has(row.id)?' open':''}><summary><div class="ss-usage-head"><span class="ss-app-title"><i class="ss-chevron" aria-hidden="true">›</i><span title="${esc(row.name)}">${esc(row.name)}</span></span><span class="ss-usage-time">${usageFmt(row.seconds)} · ${total?Math.round(row.seconds/total*100):0}%</span></div><div class="ss-track"><div style="width:${total?row.seconds/total*100:0}%"></div></div></summary><div class="ss-usage-children">${content}${unknown?`<div class="ss-usage-item ss-unassigned"><span>Без детализации</span><span class="ss-usage-time">${usageFmt(unknown)}</span></div>`:''}${!groups.length||status&&status!=='ready'?`<div class="ss-muted ss-usage-note">${esc(note)}</div>`:''}</div></details>`;
+ }
+ function restoreDetails(body,focusKey){
+  body.scrollTop=model.detailScroll[model.tab]||0;
+  if(focusKey){const node=[...body.querySelectorAll('details[data-expand]')].find(el=>el.dataset.expand===focusKey);node?.querySelector('summary')?.focus({preventScroll:true});}
+ }
  function renderDetails(){
   if(!details)return;
+  const previous=details.querySelector('.ss-detail-body');
+  if(previous)model.detailScroll[previous.dataset.tab]=previous.scrollTop;
+  const focusKey=details.contains(document.activeElement)?document.activeElement?.closest('details[data-expand]')?.dataset.expand:null;
+  details.querySelectorAll('details[data-expand]').forEach(el=>{if(el.open)model.expanded.add(el.dataset.expand);else model.expanded.delete(el.dataset.expand);});
   details.innerHTML=`<div class="ss-panel-head"><span class="ss-panel-title">Разбор учёбы</span><span class="ss-muted">${model.selected?esc(model.selected)+' <button class="ss-day-reset" title="Сбросить выбранный день">×</button>':({today:'Сегодня',week:'7 дней',month:'30 дней',year:'365 дней'})[model.period]}</span></div><div class="ss-tabs" role="tablist" aria-label="Подробности фокуса"><button role="tab" data-tab="apps">Приложения</button><button role="tab" data-tab="blocks">Блоки</button><button role="tab" data-tab="progress">Прогресс</button></div><div class="ss-detail-body"></div>`;
   details.querySelectorAll('[data-tab]').forEach(b=>{b.setAttribute('aria-selected',String(b.dataset.tab===model.tab));b.onclick=()=>{model.tab=b.dataset.tab;renderDetails();};});
   const reset=details.querySelector('.ss-day-reset');if(reset)reset.onclick=()=>{model.selected=null;renderActivity();renderDetails();};
   const body=details.querySelector('.ss-detail-body'),records=rangeRecords();
-  if(model.tab==='blocks'){body.innerHTML=recordRows(records);return;}
+  body.dataset.tab=model.tab;
+  if(model.tab==='blocks'){body.innerHTML=recordRows(records);restoreDetails(body,focusKey);return;}
   if(model.tab==='progress'){
    const completed=records.filter(r=>r.outcome==='completed').length,interrupted=records.filter(r=>r.outcome==='interrupted').length;
   const earned=records.filter(r=>r.outcome!=='repair');
   const seconds=earned.reduce((s,r)=>s+duration(r),0),attempts=earned.reduce((s,r)=>s+r.attempts,0);
   const activeDays=new Set(earned.filter(r=>duration(r)>0).map(r=>r.day)).size;
-   body.innerHTML=`<div class="ss-summary-grid"><div class="ss-summary-tile"><strong>${completed}</strong><span class="ss-muted">полных блоков</span></div><div class="ss-summary-tile"><strong>${activeDays?fmt(seconds/activeDays):'—'}</strong><span class="ss-muted">на день с учёбой</span></div><div class="ss-summary-tile"><strong>${seconds?((attempts/seconds)*3600).toFixed(1).replace('.',','):'—'}</strong><span class="ss-muted">срабатываний защиты / ч</span></div><div class="ss-summary-tile"><strong>${interrupted}</strong><span class="ss-muted">прервано</span></div></div><div class="ss-muted">Цель — 5 полных блоков в учебный день. Серия считается по дням с полным блоком. Повторные срабатывания защиты считаются отдельно. Завершение блока не означает выполнение задачи.</div>`;return;
+   body.innerHTML=`<div class="ss-summary-grid"><div class="ss-summary-tile"><strong>${completed}</strong><span class="ss-muted">полных блоков</span></div><div class="ss-summary-tile"><strong>${activeDays?fmt(seconds/activeDays):'—'}</strong><span class="ss-muted">на день с учёбой</span></div><div class="ss-summary-tile"><strong>${seconds?((attempts/seconds)*3600).toFixed(1).replace('.',','):'—'}</strong><span class="ss-muted">срабатываний защиты / ч</span></div><div class="ss-summary-tile"><strong>${interrupted}</strong><span class="ss-muted">прервано</span></div></div><div class="ss-muted">Цель — 5 полных блоков в учебный день. Серия считается по дням с полным блоком. Повторные срабатывания защиты считаются отдельно. Завершение блока не означает выполнение задачи.</div>`;restoreDetails(body,focusKey);return;
   }
-  const apps={};Object.entries(model.data.usage.days||{}).filter(([key])=>model.selected?key===model.selected:inRange(key)).forEach(([,day])=>Object.entries(day).forEach(([id,row])=>{apps[id]??={name:row.name,seconds:0};apps[id].seconds+=row.seconds;}));
-  const sorted=Object.values(apps).sort((a,b)=>b.seconds-a.seconds),total=sorted.reduce((s,r)=>s+r.seconds,0);
-  body.innerHTML=(sorted.length?`<div class="ss-muted">На экране в блоках · ${fmt(total)}</div>`+sorted.map((row,i)=>`<div class="ss-usage-row"><div class="ss-usage-head"><span title="${esc(row.name)}">${esc(row.name)}</span><span>${fmt(row.seconds)} · ${Math.round(row.seconds/total*100)}%</span></div><div class="ss-track"><div style="width:${row.seconds/total*100}%"></div></div></div>`).join(''):'<div class="ss-empty">Экранное время начнёт собираться в следующем блоке.<br>Для прошлых блоков доступны время таймера и история.</div>')+`<div class="ss-muted">${model.data.tracking?'Учёт включён':'Учёт выключен'} · оценка по переднему приложению, шаг 5 секунд, только во время фокуса и при открытом Anki. Лекции без нажатий тоже учитываются. Это время на экране, а не оценка внимания. Отключение — в «Инструментах».</div>`;
+  const sorted=aggregateUsage(model.data.usage.days,key=>model.selected?key===model.selected:inRange(key)),total=sorted.reduce((s,r)=>s+r.seconds,0);
+  body.innerHTML=(sorted.length?`<div class="ss-muted">На экране в блоках · ${fmt(total)}</div>`+sorted.map(row=>usageMarkup(row,total)).join(''):'<div class="ss-empty">Экранное время начнёт собираться в следующем блоке.<br>Для прошлых блоков доступны время таймера и история.</div>')+`<button type="button" class="ss-detail-settings">Детализация · доступ и настройки →</button><div class="ss-muted">${model.data.tracking?'Учёт включён':'Учёт выключен'} · ${model.data.detail_tracking?'подробности включены':'подробности выключены или недоступны'}. Шаг 5 секунд, только переднее приложение в учебных блоках при открытом Anki. Лекции без нажатий учитываются. Без детализации — старые данные, переходы вкладок или отсутствие доступа. Это время на экране, а не оценка внимания.</div>`;
+  body.querySelector('.ss-detail-settings').onclick=()=>pycmd('slovo:details-settings');
+  restoreDetails(body,focusKey);
  }
  function render(){
   document.documentElement.dataset.slovoMode=model.mode;
@@ -147,6 +194,6 @@
  }
  bar.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{model.mode=b.dataset.mode;render();pycmd('slovo:stats-mode:'+model.mode);});
  bar.querySelectorAll('[data-period]').forEach(b=>b.onclick=()=>{model.period=b.dataset.period;model.view={today:'week',week:'week',month:'month',year:'year'}[model.period];model.selected=null;render();});
- window.slovoFocusStats={grid,alive:()=>[...metrics,activity,details].filter(Boolean).every(el=>el.isConnected),update(data){model.data=data;const key=JSON.stringify([data.today,data.records.map(r=>[r.id,r.outcome]),Math.floor(data.records.reduce((s,r)=>s+duration(r),0)/15),Math.floor(Object.values(data.usage.days||{}).flatMap(d=>Object.values(d)).reduce((s,r)=>s+r.seconds,0)/15),data.tracking]);if(key!==this.key){this.key=key;render();}}};
+ window.slovoFocusStats={grid,alive:()=>[...metrics,activity,details].filter(Boolean).every(el=>el.isConnected),update(data){model.data=data;const key=JSON.stringify([data.today,data.records.map(r=>[r.id,r.outcome]),Math.floor(data.records.reduce((s,r)=>s+duration(r),0)/15),Math.floor(Object.values(data.usage.days||{}).flatMap(d=>Object.values(d)).reduce((s,r)=>s+r.seconds,0)/15),data.tracking,data.detail_tracking,data.detail_status]);if(key!==this.key){this.key=key;render();}}};
  render();
 })();

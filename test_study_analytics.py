@@ -1,9 +1,11 @@
 import datetime as dt
 import tempfile
+import sqlite3
 from pathlib import Path
 import unittest
 
 from anki_study.analytics import MOSCOW, REPAIR_REASON, UsageTracker, snapshot
+from anki_study.activity_detail import browser_context
 
 
 def timestamp(text):
@@ -11,6 +13,52 @@ def timestamp(text):
 
 
 class AnalyticsTests(unittest.TestCase):
+    def test_adding_details_preserves_the_existing_app_database(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'old.sqlite3'
+            with sqlite3.connect(path) as db:
+                db.execute('CREATE TABLE usage (day TEXT, app TEXT, name TEXT, seconds REAL, PRIMARY KEY(day,app))')
+                db.execute('INSERT INTO usage VALUES (?,?,?,?)', ('2026-10-20', 'arc', 'Arc', 3600))
+            tracker = UsageTracker(path)
+            self.assertEqual(tracker.summary()['days']['2026-10-20']['arc'], {'name': 'Arc', 'seconds': 3600})
+            tracker.close()
+    def test_detail_switches_permissions_gaps_and_restart_never_inflate_app_time(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'stats.sqlite3'
+            tracker = UsageTracker(path)
+            state = {'session': {'id': 'a', 'phase': 'focus', 'remaining': 3000}}
+            now = timestamp('2026-10-20T00:00:00')
+            a = browser_context('https://docs.test/a', 'A')
+            b = browser_context('https://docs.test/b', 'B')
+            for step, item in enumerate((a, a, b, b, None, a, a)):
+                tracker.sample(state, ('arc', 'Arc'), now+step*5, 100+step*5, detail=item)
+            tracker.sample(state, ('arc', 'Arc'), now+200, 300, detail=a)  # Unknown sleep gap.
+            tracker.close()
+            tracker = UsageTracker(path)
+            row = tracker.summary()['days']['2026-10-20']['arc']
+            self.assertEqual(row['seconds'], 30)
+            self.assertEqual(sum(item['seconds'] for item in row['details'].values()), 15)
+            self.assertEqual(row['details']['site:'+a['key']]['seconds'], 10)
+            self.assertEqual(row['details']['site:'+b['key']]['seconds'], 5)
+            tracker.close()
+
+    def test_delayed_or_failed_metadata_does_not_stop_app_time(self):
+        with tempfile.TemporaryDirectory() as folder:
+            tracker = UsageTracker(Path(folder) / 'stats.sqlite3')
+            state = {'session': {'id': 'a', 'phase': 'focus', 'remaining': 3000}}
+            now = timestamp('2026-10-20T12:00:00')
+            item = browser_context('https://docs.test/a', 'A')
+            for step in range(5):
+                tracker.sample(state, ('arc', 'Arc'), now+step*5, 100+step*5, defer_detail=True)
+            row = tracker.summary()['days']['2026-10-20']['arc']
+            self.assertEqual(row['seconds'], 20)
+            tracker.sample_detail(state, ('arc', 'Arc'), now+15, 115, detail=item)
+            tracker.sample_detail(state, ('arc', 'Arc'), now+20, 120, detail=item)
+            tracker.sample_detail(state, ('arc', 'Arc'), now+10, 110, detail=item)  # Stale worker.
+            row = tracker.summary()['days']['2026-10-20']['arc']
+            self.assertEqual(sum(x['seconds'] for x in row['details'].values()), 5)
+            self.assertEqual(row['seconds'], 20)
+            tracker.close()
     def test_overtime_is_extra_time_in_one_block_and_survives_local_history(self):
         now = timestamp('2026-10-20T00:05:00')
         session = {'id': 'overtime', 'phase': 'focus', 'awaiting_rest': True, 'remaining': 0,

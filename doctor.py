@@ -16,7 +16,7 @@ def main():
     errors = []
     for name in ('install.py', 'focus-helper', 'focus_open.py', 'focus_youtube_guard.py',
                  'focus_service_policy.py', 'focus_playlist_sync.py', 'focus_study.py',
-                 'anki_study/__init__.py', 'anki_study/bridge.py', 'anki_study/dashboard.py', 'anki_study/analytics.py'):
+                 'anki_study/__init__.py', 'anki_study/bridge.py', 'anki_study/dashboard.py', 'anki_study/analytics.py', 'anki_study/activity_detail.py'):
         try:
             compile((root / name).read_text(), name, 'exec')
         except (OSError, SyntaxError) as error:

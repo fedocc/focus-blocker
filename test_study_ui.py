@@ -10,6 +10,32 @@ import unittest
 
 class StudyUiTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'Node is unavailable')
+    def test_usage_breakdown_aggregates_days_escapes_titles_and_keeps_expansion_and_scroll(self):
+        source = (Path(__file__).parent / 'anki_study/focus-stats.js').read_text()
+        helpers = source[source.index(' const esc='):source.index(' const date=')]
+        helpers += source[source.index(' function aggregateUsage('):source.index(' function renderDetails(')]
+        program = r'''
+const assert=require('node:assert/strict');
+const model={tab:'apps',detailScroll:{apps:123},expanded:new Set(['arc','arc|site:docs.test']),data:{detail_supported:['arc'],detail_status:{arc:'ready'}}};
+'''+helpers+r'''
+const input={'2026-10-19':{arc:{name:'Arc',seconds:300,details:{a:{kind:'site',group:'docs.test',name:'A',seconds:100},b:{kind:'site',group:'docs.test',name:'<img onerror="bad">',seconds:50}}}},'2026-10-20':{arc:{name:'Arc',seconds:100,details:{a:{kind:'site',group:'docs.test',name:'A updated',seconds:50}}}}};
+const saved=JSON.stringify(input),rows=aggregateUsage(input,()=>true);
+assert.equal(rows[0].seconds,400);assert.equal(rows[0].details.a.seconds,150);
+assert.equal(rows[0].details.a.name,'A updated');assert.equal(usageGroups(rows[0])[0].seconds,200);
+assert.equal(aggregateUsage(input,k=>k==='2026-10-20')[0].seconds,100);
+assert.equal(JSON.stringify(input),saved);
+const markup=usageMarkup(rows[0],400);
+assert.ok(markup.includes('data-expand="arc" open'));
+assert.ok(markup.includes('data-expand="arc|site:docs.test" open'));
+assert.ok(markup.includes('Без детализации'));assert.ok(markup.includes('&lt;img'));assert.ok(!markup.includes('<img'));
+let focused=false;
+const body={scrollTop:0,querySelectorAll:()=>[{dataset:{expand:'arc'},querySelector:()=>({focus:options=>focused=options.preventScroll})}]};
+restoreDetails(body,'arc');assert.equal(body.scrollTop,123);assert.equal(focused,true);
+'''
+        result = subprocess.run(['node', '-e', program], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node is unavailable')
     def test_wallpaper_loading_cannot_commit_a_stale_selection(self):
         source = (Path(__file__).parent / 'anki_study/dashboard.py').read_text()
         function = source[source.index("  let pending='', generation=0"):source.index('  window.slovoUpdateDaylight=')]
@@ -128,6 +154,19 @@ with tempfile.TemporaryDirectory() as folder:
     QTimer.singleShot(0, lambda: app.activeModalWidget().reject())
     ui.choose_wallpaper()
     assert ui.PREFS.read_bytes()==saved
+    # The detail permission controls list only supported installed apps.
+    ui.bridge.applications=lambda:[('company.thebrowser.Browser','Arc'),('com.microsoft.VSCode','Visual Studio Code'),('com.apple.Terminal','Terminal')]
+    def configure_details():
+        dialog=app.activeModalWidget()
+        texts=[button.text() for button in dialog.findChildren(ui.QPushButton)]
+        assert 'Разрешить доступ к Arc' in texts
+        assert not any('Terminal' in text for text in texts)
+        dialog.findChild(ui.QCheckBox).setChecked(False)
+        dialog.accept()
+    QTimer.singleShot(0,configure_details)
+    ui.configure_activity_details()
+    assert dock.preferences['track_details'] is False
+    dock.preferences['track_details']=True
     # A signal test is non-modal, repeats until acknowledgement, and leaves the real timer intact.
     notice=dock.phase_notice
     ui.bridge.play_alert_sound=lambda *_: None

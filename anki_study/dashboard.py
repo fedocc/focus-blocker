@@ -10,7 +10,7 @@ from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDial
                     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QProgressBar,
                     QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl, QAbstractItemView,
                     QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy, QSize, QRect, QApplication, QCheckBox)
-from . import bridge, analytics
+from . import bridge, analytics, activity_detail
 
 PREFS = Path(__file__).parent / 'user_files/preferences.json'
 
@@ -384,6 +384,10 @@ class StudyDock(QDockWidget):
         self.stats_seen_at = 0
         self.usage_tracker = None
         self.foreground = None
+        self.detail_reader = None
+        self.detail_status = {}
+        self.usage_sampling = False
+        self.usage_generation = 0
         try:
             self.preferences = json.loads(PREFS.read_text())
         except (OSError, ValueError):
@@ -938,6 +942,77 @@ def choose_wallpaper():
         update_home_widget()
 
 
+def configure_activity_details():
+    dock = ensure_study()
+    dialog = QDialog(mw)
+    dialog.setObjectName('focusPicker')
+    dialog.setWindowTitle('Детализация учёбы')
+    dialog.setStyleSheet(STYLE)
+    dialog.resize(520, 620)
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(24, 22, 24, 22)
+    layout.setSpacing(14)
+    layout.addWidget(label('Что происходило внутри приложения', 'brand'))
+    enabled = QCheckBox('Собирать подробности во время учебных блоков')
+    enabled.setStyleSheet('color:#c4d9de;')
+    enabled.setChecked(dock.preferences.get('track_details', True))
+    layout.addWidget(enabled)
+    def toggle(checked):
+        dock.preferences['track_details'] = checked
+        if dock.usage_tracker:
+            dock.usage_tracker.context_previous = None
+        bridge.save_preferences(PREFS, dock.preferences)
+        update_home_widget()
+    enabled.toggled.connect(toggle)
+    layout.addWidget(label('Подробности хранятся на этом Mac: сайты, названия страниц и окон. Текст страниц, переписки, команды терминала и нажатия не собираются. Старые блоки задним числом не детализируются.'))
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    body = QWidget()
+    body.setObjectName('focusRoot')
+    rows = QVBoxLayout(body)
+    rows.setContentsMargins(6, 6, 12, 6)
+    rows.setSpacing(12)
+    area.setWidget(body)
+    layout.addWidget(area)
+    info = label('Доступ к браузеру разрешается отдельно. Для редакторов и документов нужен универсальный доступ Anki в macOS.')
+    for bundle, name in bridge.applications():
+        if bundle in activity_detail.BROWSERS:
+            _, row = card(rows)
+            row.addWidget(label(name, 'sectionTitle'))
+            row.addWidget(label('Сайты и названия страниц' if bundle != 'com.apple.Safari' else 'Домены сайтов'))
+            button = QPushButton('Разрешить доступ к ' + name)
+            def request_access(_=False, bundle=bundle, button=button):
+                if not dock.detail_reader:
+                    info.setText('Сбор подробностей недоступен. Перезапусти Anki после обновления.')
+                    return
+                button.setEnabled(False)
+                info.setText('Открой нужный браузер и ответь на запрос macOS, если он появится.')
+                def done(result):
+                    button.setEnabled(True)
+                    status = result[1] if result else 'error'
+                    dock.detail_status[bundle] = status
+                    info.setText(activity_detail.STATUS.get(status, activity_detail.STATUS['error']))
+                    update_home_widget()
+                dock.run(lambda: dock.detail_reader.browser(bundle, request_access=True), done)
+            button.clicked.connect(request_access)
+            row.addWidget(button)
+        elif bundle in activity_detail.WINDOW_APPS:
+            rows.addWidget(label(name + ' · ' + activity_detail.WINDOW_APPS[bundle][1]))
+    rows.addStretch()
+    layout.addWidget(info)
+    automation = QPushButton('Настройки macOS · Автоматизация браузеров')
+    automation.clicked.connect(lambda: QDesktopServices.openUrl(QUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_Automation')))
+    layout.addWidget(automation)
+    access = QPushButton('Настройки macOS · Универсальный доступ')
+    access.clicked.connect(lambda: QDesktopServices.openUrl(QUrl('x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility')))
+    layout.addWidget(access)
+    done = QPushButton('Готово')
+    done.clicked.connect(dialog.accept)
+    layout.addWidget(done)
+    dialog.exec()
+
+
 def loaded():
     mw.addonManager.setWebExports(__name__, r'(wallpaper-([a-z]+-)?(predawn|dawn|morning|day|golden|evening|night)\.png|focus-stats\.(js|css))')
     action = QAction('Учебные блоки · Слово', mw)
@@ -966,10 +1041,17 @@ def loaded():
         try:
             dock.usage_tracker = analytics.UsageTracker(PREFS.parent / 'focus-usage.sqlite3')
             dock.foreground = analytics.MacForeground()
+            try:
+                dock.detail_reader = activity_detail.MacDetails()
+            except Exception:
+                dock.detail_status['_error'] = 'error'
             dock.usage_timer = QTimer(dock)
             def sample_usage():
+                dock.usage_generation += 1
+                generation = dock.usage_generation
                 if not dock.preferences.get('track_apps', True):
                     dock.usage_tracker.previous = None
+                    dock.usage_tracker.context_previous = None
                     return
                 try:
                     state = dict(dock.state or {})
@@ -979,7 +1061,36 @@ def loaded():
                     fresh = time.monotonic() - dock.stats_seen_at < 8
                     active = fresh and (state.get('session') or {}).get('phase') == 'focus'
                     app = dock.foreground.current() if active else None
-                    dock.usage_tracker.sample(state, app, time.time(), time.monotonic(), fresh=fresh)
+                    now, mono = time.time(), time.monotonic()
+                    dock.usage_tracker.sample(state, app, now, mono, fresh=fresh, defer_detail=True)
+                    if not app or not dock.detail_reader or not dock.preferences.get('track_details', True) or dock.usage_sampling:
+                        dock.usage_tracker.sample_detail(state, app, now, mono, fresh=fresh)
+                        return
+                    bundle = app[0]
+                    if bundle not in activity_detail.BROWSERS and bundle not in activity_detail.WINDOW_APPS:
+                        dock.detail_status[bundle] = 'unsupported'
+                        dock.usage_tracker.sample_detail(state, app, now, mono, fresh=fresh)
+                        return
+                    pid = dock.foreground.pid()
+                    dock.usage_sampling = True
+                    def observed(result):
+                        dock.usage_sampling = False
+                        if result is None:
+                            result = (None, 'error')
+                        detail, status = result
+                        dock.detail_status[bundle] = status
+                        # Never attribute a slow result to the next app/block/profile.
+                        current = dock.state or {}
+                        session = current.get('session') or {}
+                        valid = (generation == dock.usage_generation and dock.preferences.get('track_apps', True) and
+                                 time.monotonic() - dock.stats_seen_at < 8 and
+                                 session.get('phase') == 'focus' and
+                                 session.get('id') == state['session']['id'] and
+                                 dock.foreground.current() == app and dock.foreground.pid() == pid)
+                        if generation == dock.usage_generation:
+                            dock.usage_tracker.sample_detail(state, app if valid else None, now, mono, fresh=valid,
+                                                            detail=detail if dock.preferences.get('track_details', True) else None)
+                    dock.run(lambda: dock.detail_reader.capture(bundle, pid), observed)
                 except Exception as error:
                     dock.usage_error = str(error)
             dock.usage_timer.timeout.connect(sample_usage)
@@ -995,6 +1106,10 @@ def loaded():
             track_apps.toggled.connect(toggle_tracking)
             mw.form.menuTools.addAction(track_apps)
             mw._slovo_tracking_action = track_apps
+            details_action = QAction('Детализация сайтов и приложений…', mw)
+            details_action.triggered.connect(configure_activity_details)
+            mw.form.menuTools.addAction(details_action)
+            mw._slovo_details_action = details_action
         except Exception as error:
             dock.usage_error = str(error)
         try:
@@ -1042,7 +1157,7 @@ def unloaded():
         mw.form.menuTools.removeAction(action)
         action.deleteLater()
         mw._slovo_study_action = None
-    for name in ('_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action', '_slovo_tracking_action', '_slovo_wallpaper_action', '_slovo_signal_action'):
+    for name in ('_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action', '_slovo_tracking_action', '_slovo_details_action', '_slovo_wallpaper_action', '_slovo_signal_action'):
         extra = getattr(mw, name, None)
         if extra:
             mw.form.menuTools.removeAction(extra)
@@ -1278,6 +1393,10 @@ def update_home_widget(*_):
     stats = analytics.snapshot(stats_state, usage, remaining=bridge.remaining_seconds(state), overtime=bridge.overtime_seconds(state))
     stats['mode'] = dock.preferences.get('stats_mode', 'focus') if dock else 'focus'
     stats['tracking'] = bool(dock and dock.usage_tracker and dock.preferences.get('track_apps', True) and not getattr(dock, 'usage_error', None))
+    stats['detail_tracking'] = bool(dock and dock.detail_reader and dock.preferences.get('track_details', True))
+    stats['detail_status'] = dock.detail_status if dock else {}
+    stats['detail_supported'] = list(activity_detail.BROWSERS) + list(activity_detail.WINDOW_APPS)
+    stats['detail_messages'] = activity_detail.STATUS
     mw.deckBrowser.web.eval(STATS_SCRIPT.replace('ADDON_PACKAGE', mw.addonManager.addonFromModule(__name__)).replace('PAYLOAD', json.dumps(stats, ensure_ascii=False)))
 
 
@@ -1286,6 +1405,9 @@ def home_message(handled, message, context):
         return handled
     if message == 'slovo:rest':
         ensure_study().begin_rest()
+        return True, None
+    if message == 'slovo:details-settings':
+        configure_activity_details()
         return True, None
     if message in ('slovo:stats-mode:cards', 'slovo:stats-mode:focus'):
         dock = ensure_study()
