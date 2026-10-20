@@ -124,6 +124,19 @@ def plan(token, date=None):
     return value
 
 
+def task_display_title(task):
+    """Hide only a redundant weekday occurrence label; leave the saved title intact."""
+    title = task['title']
+    head, separator, tail = title.rpartition(' · ')
+    weekdays = {'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье'}
+    return head if separator and head and tail.casefold() in weekdays else title
+
+
+def wallpaper_scene(hour=None):
+    hour = dt.datetime.now().astimezone().hour if hour is None else hour
+    return 'dawn' if 6 <= hour < 10 else 'day' if 10 <= hour < 17 else 'evening' if 17 <= hour < 21 else 'night'
+
+
 def applications(roots=None):
     found = {}
     if roots is None:

@@ -5,16 +5,11 @@
 .ss-segments button[aria-pressed=true] {background:#38515d;color:#f1d09c;box-shadow:0 2px 8px #06182235}
 .ss-segments button:hover {color:#f4ddb6}
 .slovo-focus-replacement {display:none;box-sizing:border-box;min-height:0;height:100%;width:100%;font-family:inherit;color:#dce9eb;text-align:left}
+html:not([data-slovo-mode=focus]) .slovo-focus-replacement {display:none!important}
 html[data-slovo-mode=focus] .slovo-original-stats {display:none!important}
 html[data-slovo-mode=focus] .slovo-focus-replacement {display:flex}
-.ss-metric {position:relative;overflow:hidden;flex-direction:column;justify-content:space-between;border:1px solid #7795a150;border-radius:24px;padding:20px;background:linear-gradient(140deg,#254350c9,#142c3bd4);--tone:#39cfb1;min-height:130px}
-.ss-metric-head {display:flex;gap:10px;align-items:center;color:var(--tone);font-size:12px;font-weight:600;letter-spacing:1px;text-transform:uppercase}
-.ss-icon {display:grid;place-items:center;width:26px;height:26px;border-radius:8px;background:color-mix(in srgb,var(--tone) 14%,transparent);font-size:16px}
-.ss-metric-body {position:relative;z-index:1;margin-top:16px;margin-bottom:10px}
-.ss-value {font-size:30px;font-weight:600;color:var(--tone);line-height:1.1;letter-spacing:-1px;font-variant-numeric:tabular-nums}
-.ss-unit {font-size:13px;font-weight:400;letter-spacing:0;margin-left:5px;color:#bacbd1}
-.ss-note {font-size:10px;color:#a8c0ca;margin-top:7px;line-height:1.4}
-.ss-spark {position:absolute;bottom:0;left:0;width:100%;height:34px;opacity:.8;pointer-events:none}
+.ss-metric {display:none}
+.ss-native-activity {display:none}
 .ss-panel {flex-direction:column;border:1px solid #68838c75;border-radius:24px;padding:20px;background:linear-gradient(135deg,#203a48d4,#152e3bd4);overflow:hidden;min-height:250px;gap:14px}
 .ss-panel-head {display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;flex:none}
 .ss-panel-title {font-size:13px;letter-spacing:1px;text-transform:uppercase;font-weight:600}
@@ -55,4 +50,4 @@ html[data-slovo-mode=focus] .slovo-focus-replacement {display:flex}
 .ss-summary-tile strong {display:block;font-size:22px;color:#e6d1ad;font-weight:500;margin-bottom:4px}
 .ss-empty {padding:18px 0;color:#a8c1ca;font-size:12px;line-height:1.6}
 .ss-day-reset {padding:3px 6px;color:#e7c68d}
-@media(max-width:1000px){.ss-metric{padding:14px}.ss-value{font-size:25px}.ss-panel{padding:16px}.ss-metric-head{font-size:10px;letter-spacing:.4px}}
+@media(max-width:1000px){.ss-panel{padding:16px}}

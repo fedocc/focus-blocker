@@ -9,7 +9,7 @@ from aqt import mw, gui_hooks
 from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDialog, QDialog, QFrame,
                     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QProgressBar,
                     QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl, QAbstractItemView,
-                    QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy)
+                    QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy, QSize, QRect)
 from . import bridge, analytics
 
 PREFS = Path(__file__).parent / 'user_files/preferences.json'
@@ -59,7 +59,7 @@ QDialog#focusPicker QListWidget::item:hover { background: #203f4c; }
 QDialog#focusPicker QListWidget::item:selected { background: #2b4c56; }
 QDialog#focusPicker QListWidget::indicator { width: 17px; height: 17px; }
 QWidget#focusRoot QListWidget#focusTasks { background:#102934; color:#dbe7eb; border:1px solid #294550; border-radius:9px; outline:none; padding:4px; }
-QWidget#focusRoot QListWidget#focusTasks::item { padding:9px 4px; }
+QWidget#focusRoot QListWidget#focusTasks::item { padding:6px 4px; }
 QWidget#focusRoot QListWidget#focusTasks::indicator { width:17px; height:17px; }
 '''
 
@@ -153,6 +153,33 @@ class MenuTimer:
         self.send(self.item, 'release', result=None)
 
 
+class TaskList(QListWidget):
+    """Keep trackpad scrolling inside the list and show complete task titles."""
+    def __init__(self):
+        super().__init__()
+        self.setWordWrap(True)
+        self.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+
+    def wheelEvent(self, event):
+        super().wheelEvent(event)
+        event.accept()  # At either boundary Qt must not hand this gesture to the dock.
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.reflow()
+
+    def reflow(self):
+        width = max(80, self.viewport().width() - 46)
+        metrics = self.fontMetrics()
+        for index in range(self.count()):
+            item = self.item(index)
+            text = metrics.boundingRect(QRect(0, 0, width, 10000),
+                                        Qt.TextFlag.TextWordWrap, item.text())
+            item.setSizeHint(QSize(0, max(32, text.height() + 16)))
+
+
 class StudyDock(QDockWidget):
     def __init__(self):
         super().__init__('Учебные блоки', mw)
@@ -237,7 +264,7 @@ class StudyDock(QDockWidget):
         layout.addWidget(self.progress)
         self.task_card, task_layout = card(layout)
         task_layout.addWidget(label('01   Задачи блока', 'sectionTitle'))
-        self.task_list = QListWidget()
+        self.task_list = TaskList()
         self.task_list.setObjectName('focusTasks')
         self.task_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.task_list.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -309,6 +336,7 @@ class StudyDock(QDockWidget):
         picker_actions.addWidget(cancel)
         picker_actions.addWidget(done)
         picker_layout.addLayout(picker_actions)
+        self.sort_apps()
         self.update_app_summary()
         self.message = Notice('')
         self.message.setObjectName('notice')
@@ -448,10 +476,11 @@ class StudyDock(QDockWidget):
         return [task for task in self.tasks if task['occurrence_id'] in self.selected_ids]
 
     def render_tasks(self, tasks, locked=False):
+        position = self.task_list.verticalScrollBar().value()
         self.task_list.blockSignals(True)
         self.task_list.clear()
         for task in tasks:
-            item = QListWidgetItem(task['title'])
+            item = QListWidgetItem(bridge.task_display_title(task))
             item.setToolTip(task['title'])
             item.setData(Qt.ItemDataRole.UserRole, task.get('occurrence_id'))
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -459,6 +488,8 @@ class StudyDock(QDockWidget):
             self.task_list.addItem(item)
         self.task_list.blockSignals(False)
         self.task_list.setFixedHeight(min(220, max(75, len(tasks) * 43 + 14)))
+        self.task_list.reflow()
+        self.task_list.verticalScrollBar().setValue(position)
         self.task_list.setVisible(bool(tasks))
         self.task_list.setEnabled(not locked)
         self.title.setVisible(not locked and not self.selected_ids)
@@ -495,12 +526,28 @@ class StudyDock(QDockWidget):
         self.app_summary.setToolTip(', '.join(names))
         self.app_count.setText(f'Выбрано: {len(names)}')
 
+    def sort_apps(self):
+        items = [self.apps.takeItem(0) for _ in range(self.apps.count())]
+        for item in sorted(items, key=lambda item: (
+                item.checkState() != Qt.CheckState.Checked, item.text().casefold())):
+            self.apps.addItem(item)
+
     def pick_apps(self):
-        previous = [self.apps.item(i).checkState() for i in range(self.apps.count())]
+        previous = {self.apps.item(i).data(Qt.ItemDataRole.UserRole): self.apps.item(i).checkState()
+                    for i in range(self.apps.count())}
         self.search.clear()
+        self.sort_apps()
+        self.apps.scrollToTop()
         if self.picker.exec() != QDialog.DialogCode.Accepted:
-            for index, state in enumerate(previous):
-                self.apps.item(index).setCheckState(state)
+            for index in range(self.apps.count()):
+                item = self.apps.item(index)
+                item.setCheckState(previous[item.data(Qt.ItemDataRole.UserRole)])
+        else:
+            self.preferences['apps'] = [self.apps.item(i).data(Qt.ItemDataRole.UserRole)
+                                        for i in range(self.apps.count())
+                                        if self.apps.item(i).checkState() == Qt.CheckState.Checked]
+            bridge.save_preferences(PREFS, self.preferences)
+        self.sort_apps()
         self.update_app_summary()
 
     def toggle_task(self, index):
@@ -753,8 +800,8 @@ HOME_SCRIPT = r'''
   `;
   document.head.appendChild(style);
   const updateDaylight=()=>{
-   const hour=new Date().getHours();
-   const scene=hour>=6&&hour<10?'dawn':hour>=10&&hour<17?'day':hour>=17&&hour<21?'evening':'night';
+   const scene=window.slovoHomeState?.scene;
+   if(!scene)return;
    if(document.documentElement.dataset.slovoScene===scene)return;
    const url='/_addons/ADDON_PACKAGE/wallpaper-'+scene+'.png';
    const preload=new Image();preload.onload=()=>{
@@ -762,7 +809,7 @@ HOME_SCRIPT = r'''
     document.documentElement.dataset.slovoScene=scene;
    };preload.src=url;
   };
-  updateDaylight();
+  window.slovoUpdateDaylight=updateDaylight;
   const clock=setInterval(()=>{if(!style.isConnected){clearInterval(clock);return;}updateDaylight();},30000);
   document.addEventListener('visibilitychange',updateDaylight);
  }
@@ -795,6 +842,7 @@ HOME_SCRIPT = r'''
   },250);
  }
  const s = PAYLOAD;
+ window.slovoHomeState=s;window.slovoUpdateDaylight?.();
  el._snapshot = {...s,at:performance.now()};
  el.querySelector('.sf-phase').textContent = s.phase;
  el.querySelector('.sf-count').textContent = s.count+' / 5';
@@ -814,13 +862,13 @@ HOME_SCRIPT = r'''
     #slovo-home-tasks .st-brand {font-size:10px;letter-spacing:2px;color:#dbbe88;margin-bottom:5px}
     #slovo-home-tasks h2 {font-size:17px;font-weight:600;margin:0;color:#e2ecee}
     #slovo-home-tasks .st-refresh {flex:none;background:#284b5866;color:#b8d0d4;border:1px solid #55768166;border-radius:10px;width:32px;height:32px;font-size:18px;cursor:pointer;padding:0}
-    #slovo-home-tasks .st-list {display:flex;flex-direction:column;gap:6px;overflow:auto;min-height:0;flex:1;scrollbar-width:thin}
-    #slovo-home-tasks .st-task {display:flex;align-items:center;gap:12px;width:100%;box-sizing:border-box;background:#17384599;border:1px solid #49687470;border-radius:12px;padding:8px 10px;color:#d9e7e9;text-align:left;cursor:pointer;font:inherit;font-size:12px;line-height:1.45;flex-shrink:0}
+    #slovo-home-tasks .st-list {display:flex;flex-direction:column;gap:5px;overflow:auto;overscroll-behavior:contain;min-height:0;flex:1;scrollbar-width:thin}
+    #slovo-home-tasks .st-task {display:flex;align-items:flex-start;gap:9px;width:100%;box-sizing:border-box;background:#17384599;border:1px solid #49687470;border-radius:12px;padding:6px 9px;color:#d9e7e9;text-align:left;cursor:pointer;font:inherit;font-size:12px;line-height:1.35;flex-shrink:0}
     #slovo-home-tasks .st-task:hover {background:#2b505ed9;border-color:#c9b17c}
     #slovo-home-tasks .st-task:disabled {cursor:default;opacity:.65}
     #slovo-home-tasks .st-num {color:#dfc38f;font-size:13px;flex:none;border:1px solid #67828c;border-radius:4px;width:17px;height:17px;display:grid;place-items:center}
     #slovo-home-tasks .st-task[aria-checked="true"] {border-color:#d2b67d;background:#294c57bb}
-    #slovo-home-tasks .st-title {overflow-wrap:anywhere;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;flex:1}
+    #slovo-home-tasks .st-title {overflow-wrap:anywhere;min-width:0;display:block;white-space:normal;flex:1}
     #slovo-home-tasks .st-arrow {color:#8eaeb8;flex:none}
     #slovo-home-tasks .st-note {font-size:11px;color:#9bb9c2;line-height:1.5}
     #slovo-home-tasks .st-empty {font-size:13px;color:#aec4cb;line-height:1.6;padding:8px 0}
@@ -839,15 +887,29 @@ HOME_SCRIPT = r'''
   const key = JSON.stringify([s.tasks,s.active,s.connected,s.planBusy,s.selected]);
   if (tasks._key !== key) {
    tasks._key = key;
-   const list = tasks.querySelector('.st-list'); list.replaceChildren();
+   const list = tasks.querySelector('.st-list'), position=list.scrollTop;
+   list.querySelector('.st-empty')?.remove();
+   const existing=new Map([...list.querySelectorAll('.st-task')].map(b=>[b.dataset.id,b]));
    s.tasks.forEach((task,i) => {
-    const button = document.createElement('button'); button.type='button';button.className='st-task';button.disabled=s.active;button.title=task.title;
-    button.setAttribute('role','checkbox');button.setAttribute('aria-checked',String(task.selected));
-    const num=document.createElement('span');num.className='st-num';num.textContent=task.selected?'✓':'';
-    const title=document.createElement('span');title.className='st-title';title.textContent=task.title;
-    const arrow=document.createElement('span');arrow.className='st-arrow';arrow.textContent='';
-    button.append(num,title,arrow);button.onclick=()=>pycmd('slovo:task:'+i);list.appendChild(button);
+    const id=task.id||String(i);
+    let button=existing.get(id);
+    if(!button){
+     button=document.createElement('button');button.type='button';button.className='st-task';button.dataset.id=id;
+     button.setAttribute('role','checkbox');
+     const num=document.createElement('span');num.className='st-num';
+     const title=document.createElement('span');title.className='st-title';
+     button.append(num,title);
+     button.onclick=()=>pycmd('slovo:task:'+button.dataset.index);
+    }
+    existing.delete(id);button.dataset.index=i;button.disabled=s.active;button.title=task.title;
+    button.setAttribute('aria-checked',String(task.selected));
+    button.querySelector('.st-num').textContent=task.selected?'✓':'';
+    button.querySelector('.st-title').textContent=task.title;
+    // Reuse nodes on selection updates: focus and scroll stay where the user left them.
+    if(list.children[i]!==button)list.insertBefore(button,list.children[i]||null);
    });
+   existing.forEach(button=>button.remove());
+   list.scrollTop=position;
    if (!s.tasks.length) {
     const empty=document.createElement('div');empty.className='st-empty';
     empty.textContent=s.planBusy?'Загружаем план из Слова…':s.connected?'В плане пока нет задач. Добавь их в Слове и обнови список.':'Подключи Слово в настройках блока, чтобы видеть свой план здесь.';
@@ -891,7 +953,9 @@ def update_home_widget(*_):
         'title': committed.get('title', f'Выбрано задач: {len(chosen)}' if chosen else 'Выбери задачи для блока'),
         'subtitle': ('80 мин учёбы · отдых 10 / 30 мин' if state else 'Проверяем системный таймер…'),
         'archive': str((mw.col.get_config('slovo_archive') or {}).get('deck_id', '')),
-        'tasks': [{'title': task['title'], 'selected': task.get('occurrence_id') in chosen} for task in tasks],
+        'tasks': [{'id': task.get('occurrence_id'), 'title': bridge.task_display_title(task),
+                   'selected': task.get('occurrence_id') in chosen} for task in tasks],
+        'scene': bridge.wallpaper_scene(),
         'selected': len(chosen),
         'connected': bool(dock and dock.preferences.get('token')),
         'planBusy': bool(dock and dock.plan_busy),

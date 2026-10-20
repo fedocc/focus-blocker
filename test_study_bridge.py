@@ -10,6 +10,15 @@ from anki_study import bridge
 
 
 class BridgeTests(unittest.TestCase):
+    def test_local_wallpaper_period_boundaries_and_task_labels(self):
+        expected = {0:'night',5:'night',6:'dawn',7:'dawn',9:'dawn',10:'day',
+                    16:'day',17:'evening',20:'evening',21:'night',23:'night'}
+        for hour, scene in expected.items():
+            self.assertEqual(bridge.wallpaper_scene(hour), scene)
+        self.assertEqual(bridge.task_display_title({'title':'Лекция · Вторник'}), 'Лекция')
+        for title in ['Вторник', 'Разобрать · тему', 'Лекция · 18:00']:
+            self.assertEqual(bridge.task_display_title({'title':title}), title)
+
     def test_remaining_uses_protected_deadline_despite_stale_response(self):
         state = {'session': {'remaining':4800, 'deadline_mono':14800}}
         with patch.object(bridge.time, 'clock_gettime', return_value=10300):

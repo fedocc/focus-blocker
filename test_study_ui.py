@@ -1,6 +1,7 @@
 """Exercise the actual Qt checklist in an isolated, offscreen process."""
 import importlib.util
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -8,12 +9,33 @@ import unittest
 
 
 class StudyUiTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('node'), 'Node is unavailable')
+    def test_calendar_rules_include_nested_css_style_rules(self):
+        script = (Path(__file__).parent / 'anki_study/focus-stats.js').read_text()
+        function = script[script.index(' function calendarRules('):script.index(' calendarStyle.textContent=')]
+        program = function + """
+const rules=[{selectorText:'#onigiri-heatmap-container', cssRules:[],
+ cssText:'#onigiri-heatmap-container {border-radius:24px}'},
+ {cssText:'@media(max-width:1000px) { ignored }',cssRules:[
+  {selectorText:'#onigiri-heatmap-container .heatmap-grid',cssRules:[],
+   cssText:'#onigiri-heatmap-container .heatmap-grid {display:grid}'}]},
+ {selectorText:'.unrelated',cssRules:[],cssText:'.unrelated {color:red}'}];
+process.stdout.write(calendarRules(rules));
+"""
+        result = subprocess.run(['node', '-e', program], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('#slovo-focus-heatmap {border-radius:24px}', result.stdout)
+        self.assertIn('@media(max-width:1000px)', result.stdout)
+        self.assertIn('#slovo-focus-heatmap .heatmap-grid {display:grid}', result.stdout)
+        self.assertNotIn('.unrelated', result.stdout)
+
     @unittest.skipUnless(importlib.util.find_spec('aqt'), 'Anki Qt is unavailable in this Python')
     def test_multiselect_survives_plan_refresh_and_locks_with_session(self):
         program = r'''
 import tempfile
 from pathlib import Path
-from aqt.qt import QApplication, QMainWindow
+from aqt.qt import QApplication, QMainWindow, QListWidgetItem, Qt, QTimer, QPoint, QPointF
+from PyQt6.QtGui import QWheelEvent
 from anki_study import dashboard as ui
 app = QApplication([])
 window = QMainWindow()
@@ -47,6 +69,33 @@ with tempfile.TemporaryDirectory() as folder:
     assert not dock.task_list.isEnabled()
     assert dock.selected_ids == set(), 'active block selection must not be mutable'
     assert dock.task_list.count() == 2
+    # Selected applications come first and saving does not require starting a block.
+    for bundle,name,checked in [('z','Z Editor',True),('a','A Unselected',False),('b','B Browser',True)]:
+        item=QListWidgetItem(name);item.setData(Qt.ItemDataRole.UserRole,bundle)
+        item.setFlags(item.flags()|Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        dock.apps.addItem(item)
+    dock.sort_apps()
+    assert [dock.apps.item(i).data(Qt.ItemDataRole.UserRole) for i in range(3)] == ['b','z','a']
+    QTimer.singleShot(0, dock.picker.accept)
+    dock.pick_apps()
+    assert ui.json.loads(ui.PREFS.read_text())['apps'] == ['b','z']
+    QTimer.singleShot(0, lambda: (dock.apps.item(0).setCheckState(Qt.CheckState.Unchecked),dock.picker.reject()))
+    dock.pick_apps()
+    assert dock.apps.item(0).checkState() == Qt.CheckState.Checked
+    # Wrapping and boundary wheel handling do not depend on the outer dock.
+    dock.state['session']=None
+    long_tasks=[{'title':('Полное длинное название задачи без обрезки '*4)+str(i),'occurrence_id':str(i)} for i in range(12)]
+    dock.render_tasks(long_tasks)
+    dock.show();window.show();app.processEvents()
+    dock.task_list.resize(280,220);app.processEvents()
+    dock.task_list.reflow()
+    assert dock.task_list.item(0).sizeHint().height()>60
+    wheel=QWheelEvent(QPointF(20,20),QPointF(20,20),QPoint(0,0),QPoint(0,120),
+                      Qt.MouseButton.NoButton,Qt.KeyboardModifier.NoModifier,Qt.ScrollPhase.ScrollUpdate,False)
+    dock.task_list.verticalScrollBar().setValue(0)
+    wheel.ignore();dock.task_list.wheelEvent(wheel)
+    assert wheel.isAccepted(), 'wheel at boundary must not reach the outer scroll area'
     dock.poller.stop()
     dock.display_timer.stop()
     dock.close()
