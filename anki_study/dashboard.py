@@ -862,13 +862,13 @@ HOME_SCRIPT = r'''
     #slovo-home-tasks .st-brand {font-size:10px;letter-spacing:2px;color:#dbbe88;margin-bottom:5px}
     #slovo-home-tasks h2 {font-size:17px;font-weight:600;margin:0;color:#e2ecee}
     #slovo-home-tasks .st-refresh {flex:none;background:#284b5866;color:#b8d0d4;border:1px solid #55768166;border-radius:10px;width:32px;height:32px;font-size:18px;cursor:pointer;padding:0}
-    #slovo-home-tasks .st-list {display:flex;flex-direction:column;gap:5px;overflow:auto;overscroll-behavior:contain;min-height:0;flex:1;scrollbar-width:thin}
-    #slovo-home-tasks .st-task {display:flex;align-items:flex-start;gap:9px;width:100%;box-sizing:border-box;background:#17384599;border:1px solid #49687470;border-radius:12px;padding:6px 9px;color:#d9e7e9;text-align:left;cursor:pointer;font:inherit;font-size:12px;line-height:1.35;flex-shrink:0}
+    #slovo-home-tasks .st-list {display:flex;flex-direction:column;gap:5px;box-sizing:border-box;width:100%;max-width:100%;min-width:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior-x:none;overscroll-behavior-y:contain;touch-action:pan-y;min-height:0;flex:1;scrollbar-width:thin}
+    #slovo-home-tasks .st-task {display:grid;grid-template-columns:17px minmax(0,1fr);align-items:center;justify-items:start;gap:10px;width:100%;max-width:100%;min-width:0;margin:0;box-sizing:border-box;background:#17384599;border:1px solid #49687470;border-radius:10px;padding:7px 10px;color:#d9e7e9;text-align:left;cursor:pointer;font:inherit;font-size:12px;line-height:1.35;flex-shrink:0}
     #slovo-home-tasks .st-task:hover {background:#2b505ed9;border-color:#c9b17c}
     #slovo-home-tasks .st-task:disabled {cursor:default;opacity:.65}
-    #slovo-home-tasks .st-num {color:#dfc38f;font-size:13px;flex:none;border:1px solid #67828c;border-radius:4px;width:17px;height:17px;display:grid;place-items:center}
+    #slovo-home-tasks .st-num {color:#dfc38f;font-size:13px;flex:none;border:1px solid #67828c;border-radius:4px;width:17px;height:17px;box-sizing:border-box;display:grid;place-items:center}
     #slovo-home-tasks .st-task[aria-checked="true"] {border-color:#d2b67d;background:#294c57bb}
-    #slovo-home-tasks .st-title {overflow-wrap:anywhere;min-width:0;display:block;white-space:normal;flex:1}
+    #slovo-home-tasks .st-title {overflow-wrap:anywhere;word-break:normal;min-width:0;width:100%;display:block;white-space:normal;text-align:left}
     #slovo-home-tasks .st-arrow {color:#8eaeb8;flex:none}
     #slovo-home-tasks .st-note {font-size:11px;color:#9bb9c2;line-height:1.5}
     #slovo-home-tasks .st-empty {font-size:13px;color:#aec4cb;line-height:1.6;padding:8px 0}
