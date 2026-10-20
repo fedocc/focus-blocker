@@ -128,6 +128,19 @@ with tempfile.TemporaryDirectory() as folder:
     QTimer.singleShot(0, lambda: app.activeModalWidget().reject())
     ui.choose_wallpaper()
     assert ui.PREFS.read_bytes()==saved
+    # A signal test is non-modal, repeats until acknowledgement, and leaves the real timer intact.
+    notice=dock.phase_notice
+    ui.bridge.play_alert_sound=lambda *_: None
+    ui.QApplication.beep=lambda: None
+    before_signal=ui.json.dumps(dock.state,sort_keys=True)
+    notice.present({'id':'demo','kind':'break'},demo=True)
+    assert not notice.isModal()
+    assert notice.repeat.isActive()
+    assert notice.event['kind']=='break'
+    assert ui.json.dumps(dock.state,sort_keys=True)==before_signal
+    notice.acknowledge()
+    assert not notice.repeat.isActive() and notice.event is None
+    assert ui.json.dumps(dock.state,sort_keys=True)==before_signal
     # Wrapping and boundary wheel handling do not depend on the outer dock.
     dock.state['session']=None
     long_tasks=[{'title':('Полное длинное название задачи без обрезки '*4)+str(i),'occurrence_id':str(i)} for i in range(12)]
@@ -143,6 +156,7 @@ with tempfile.TemporaryDirectory() as folder:
     assert wheel.isAccepted(), 'wheel at boundary must not reach the outer scroll area'
     dock.poller.stop()
     dock.display_timer.stop()
+    notice.dismiss()
     dock.close()
 window.close()
 print('Qt checklist: passed')

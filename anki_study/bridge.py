@@ -16,6 +16,58 @@ HELPER = '/Library/PrivilegedHelperTools/focus-open/focus-helper'
 COMMANDS = {'study-status', 'study-start', 'study-emergency-request', 'study-emergency-confirm'}
 
 
+class PhaseAlerts:
+    """Remember acknowledgements without ever writing protected timer state."""
+    def __init__(self, preferences):
+        self.preferences = preferences
+        self.previous = None
+        self.pending = None
+        self.dirty = False
+        self.initial = True
+
+    def observe(self, state, now=None):
+        now = time.time() if now is None else now
+        session = state.get('session')
+        previous = self.previous
+        candidate = None
+        if session and session['phase'] == 'break':
+            candidate = {'id': session['id'], 'kind': 'break', 'ends_at': session['ends_at']}
+            saved = self.preferences.get('alert_last_break', {})
+            if saved.get('id') != session['id']:
+                self.preferences['alert_last_break'] = dict(candidate)
+                self.dirty = True
+        elif not session:
+            if previous and previous.get('phase') == 'break':
+                candidate = {'id': previous['id'], 'kind': 'ready'}
+            elif self.pending and self.pending['kind'] == 'ready':
+                candidate = self.pending
+            elif self.initial:
+                saved = self.preferences.get('alert_last_break', {})
+                if saved.get('id') and 0 <= now - saved.get('ends_at', 0) < 300:
+                    candidate = {'id': saved['id'], 'kind': 'ready'}
+        if candidate and self.preferences.get('alert_ack_' + candidate['kind']) == candidate['id']:
+            candidate = None
+        self.pending = candidate
+        self.previous = dict(session) if session else None
+        self.initial = False
+        return candidate
+
+    def acknowledge(self):
+        if self.pending:
+            self.preferences['alert_ack_' + self.pending['kind']] = self.pending['id']
+            self.dirty = True
+            self.pending = None
+
+
+def play_alert_sound(kind='break'):
+    """Normal media output: independent of notification banners and Focus mode."""
+    sound = Path('/System/Library/Sounds') / ('Glass.aiff' if kind == 'break' else 'Hero.aiff')
+    if not sound.is_file() or not Path('/usr/bin/afplay').is_file():
+        return None
+    return subprocess.Popen(['/usr/bin/afplay', '-v', '1', str(sound)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def remaining_seconds(state):
     """Use the service's system clock, independent of response latency and NTP."""
     session = (state or {}).get('session')

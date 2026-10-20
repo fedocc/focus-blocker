@@ -9,7 +9,7 @@ from aqt import mw, gui_hooks
 from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDialog, QDialog, QFrame,
                     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QProgressBar,
                     QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl, QAbstractItemView,
-                    QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy, QSize, QRect)
+                    QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy, QSize, QRect, QApplication)
 from . import bridge, analytics
 
 PREFS = Path(__file__).parent / 'user_files/preferences.json'
@@ -138,9 +138,14 @@ class MenuTimer:
             remaining = math.ceil(bridge.remaining_seconds(state))
             prefix = '◉' if session['phase'] == 'focus' else '☕'
             text = f'{prefix} {remaining // 60:02}:{remaining % 60:02}'
+            notice = self.dock.phase_notice
+            if session['phase'] == 'break':
+                text = f'{"‼" if notice.event and int(time.monotonic()) % 2 else "☕"} ОТДЫХ {remaining // 60:02}:{remaining % 60:02}'
             tip = session['task']['title']
         elif not state:
             text = 'Фокус · …'
+        elif self.dock.phase_notice.event:
+            text = '✓ ОТДЫХ ЗАВЕРШЁН'
         self.send(self.button, 'setTitle:', [self.string(text)], [self.c.c_void_p], None)
         self.send(self.button, 'setToolTip:', [self.string(tip)], [self.c.c_void_p], None)
 
@@ -151,6 +156,137 @@ class MenuTimer:
         self.timer.stop()
         self.send(self.bar, 'removeStatusItem:', [self.item], [self.c.c_void_p], None)
         self.send(self.item, 'release', result=None)
+
+
+class PhaseNotice(QDialog):
+    """A non-modal, acknowledged signal; it never starts/stops a study block."""
+    def __init__(self, dock):
+        super().__init__(mw, Qt.WindowType.Dialog | Qt.WindowType.WindowStaysOnTopHint)
+        self.dock = dock
+        self.gate = bridge.PhaseAlerts(dock.preferences)
+        self.event = None
+        self.demo = False
+        self.player = None
+        self.setObjectName('focusPicker')
+        self.setWindowTitle('Фокус · сигнал таймера')
+        self.setStyleSheet(STYLE)
+        self.setMinimumWidth(470)
+        self.setModal(False)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(16)
+        self.headline = label('', 'brand')
+        self.headline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.headline)
+        self.clock = label('', 'timer')
+        self.clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.clock)
+        self.detail = label('')
+        self.detail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.detail)
+        self.sound_status = label('')
+        self.sound_status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.sound_status)
+        self.ack = QPushButton('Я заметил — иду отдыхать')
+        self.ack.setDefault(False)
+        self.ack.setAutoDefault(False)
+        self.ack.clicked.connect(self.acknowledge)
+        layout.addWidget(self.ack)
+        self.repeat = QTimer(self)
+        self.repeat.setInterval(20000)
+        self.repeat.timeout.connect(self.ring)
+        self.clock_timer = QTimer(self)
+        self.clock_timer.setInterval(500)
+        self.clock_timer.timeout.connect(self.update_clock)
+
+    def save(self):
+        if self.gate.dirty:
+            bridge.save_preferences(PREFS, self.dock.preferences)
+            self.gate.dirty = False
+
+    def observe(self, state):
+        if self.demo:
+            return
+        event = self.gate.observe(state)
+        self.save()
+        if event is None:
+            self.dismiss()
+        elif not self.event or (event['id'], event['kind']) != (self.event['id'], self.event['kind']):
+            self.present(event)
+
+    def present(self, event, demo=False):
+        self.dismiss()
+        self.event = event
+        self.demo = demo
+        rest = event['kind'] == 'break'
+        self.headline.setText('ПРОВЕРКА СИГНАЛА' if demo else 'БЛОК ЗАВЕРШЁН · ПОРА ОТДОХНУТЬ' if rest else 'ПЕРЕРЫВ ЗАВЕРШЁН')
+        self.detail.setText('Это проверка. Учебный таймер не меняется.' if demo else
+                            'Встань, пройдись, отдохни от экрана.\nПерерыв уже идёт; подтверждение не меняет таймер.' if rest else
+                            'Можно вернуться к учёбе.\nСледующий блок запускается вручную.')
+        self.ack.setText('Сигнал замечен' if demo else 'Я заметил — иду отдыхать' if rest else 'Я заметил')
+        self.sound_status.setText('Звук повторяется каждые 20 секунд до подтверждения.\nЕсли его не слышно, проверь громкость и выбранный аудиовыход.')
+        self.update_clock()
+        self.show()
+        self.clock_timer.start()
+        self.repeat.start()
+        self.ring()
+        QTimer.singleShot(0, self.bring_forward)
+
+    def bring_forward(self):
+        if not self.event:
+            return
+        self.raise_()
+        self.activateWindow()
+        QApplication.alert(self, 0)
+        native = getattr(self.dock, 'menu_timer', None)
+        if native:
+            try:
+                app = native.send(native.objc.objc_getClass(b'NSApplication'), 'sharedApplication')
+                native.send(app, 'activateIgnoringOtherApps:', [True], [native.c.c_bool], None)
+                native.tick()
+            except Exception:
+                pass  # The Qt window and audio remain independent fallbacks.
+
+    def update_clock(self):
+        if not self.event:
+            return
+        seconds = 600 if self.demo else math.ceil(bridge.remaining_seconds(self.dock.state))
+        self.clock.setText(f'{seconds // 60:02}:{seconds % 60:02}' if self.event['kind'] == 'break' else 'ГОТОВО')
+
+    def ring(self):
+        if not self.event:
+            return
+        try:
+            if self.player and self.player.poll() is None:
+                self.player.terminate()
+            self.player = bridge.play_alert_sound(self.event['kind'])
+            if self.player is None:
+                QApplication.beep()
+        except OSError:
+            QApplication.beep()
+
+    def acknowledge(self):
+        if not self.demo:
+            self.gate.acknowledge()
+            self.save()
+        self.dismiss()
+
+    def dismiss(self):
+        self.repeat.stop()
+        self.clock_timer.stop()
+        if self.player and self.player.poll() is None:
+            self.player.terminate()
+        self.player = None
+        self.event = None
+        self.demo = False
+        self.hide()
+
+    def reject(self):
+        self.acknowledge()
+
+    def closeEvent(self, event):
+        self.acknowledge()
+        event.accept()
 
 
 class TaskList(QListWidget):
@@ -206,6 +342,7 @@ class StudyDock(QDockWidget):
             self.preferences = json.loads(PREFS.read_text())
         except (OSError, ValueError):
             self.preferences = {}
+        self.phase_notice = PhaseNotice(self)
         header = QWidget()
         header.setObjectName('focusHeader')
         header_layout = QHBoxLayout(header)
@@ -416,6 +553,7 @@ class StudyDock(QDockWidget):
                 self.start.setEnabled(False)
                 return
             self.state = value
+            self.phase_notice.observe(value)
             self.stats_seen_at = time.monotonic()
             if self.usage_tracker:
                 try:
@@ -730,6 +868,10 @@ def loaded():
     wallpaper.triggered.connect(choose_wallpaper)
     mw.form.menuTools.addAction(wallpaper)
     mw._slovo_wallpaper_action = wallpaper
+    signal = QAction('Проверить сигнал окончания блока…', mw)
+    signal.triggered.connect(lambda: ensure_study().phase_notice.present({'id': 'demo', 'kind': 'break'}, demo=True))
+    mw.form.menuTools.addAction(signal)
+    mw._slovo_signal_action = signal
     archive = QAction('Архивировать текущие колоды…', mw)
     archive.triggered.connect(archive_decks)
     mw.form.menuTools.addAction(archive)
@@ -801,6 +943,8 @@ def unloaded():
     dock = getattr(mw, '_slovo_study_dock', None)
     if dock:
         dock.closed = True
+        dock.phase_notice.dismiss()
+        dock.phase_notice.deleteLater()
         dock.poller.stop()
         dock.display_timer.stop()
         if getattr(dock, 'usage_timer', None):
@@ -818,7 +962,7 @@ def unloaded():
         mw.form.menuTools.removeAction(action)
         action.deleteLater()
         mw._slovo_study_action = None
-    for name in ('_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action', '_slovo_tracking_action', '_slovo_wallpaper_action'):
+    for name in ('_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action', '_slovo_tracking_action', '_slovo_wallpaper_action', '_slovo_signal_action'):
         extra = getattr(mw, name, None)
         if extra:
             mw.form.menuTools.removeAction(extra)
