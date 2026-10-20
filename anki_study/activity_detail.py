@@ -145,10 +145,15 @@ def browser_script(bundle, path=None):
     # An explicit verified bundle path also resolves scripting terminology when
     # LaunchServices cannot resolve application IDs in a child process.
     target = 'application ' + json.dumps(path, ensure_ascii=False) if path else 'application id ' + json.dumps(bundle)
-    tab = 'current tab' if kind == 'safari' else 'active tab'
-    title = '""' if kind == 'safari' else 'title of t'
-    private = ('try\nset privateMode to mode of w\nif privateMode is "incognito" then return "PRIVATE"\nif privateMode is not "normal" then return "ERROR" & (ASCII character 31) & "privacy" & (ASCII character 31) & "0"\non error\nif incognito of w then return "PRIVATE"\nend try' if kind == 'arc' else
-               'if mode of w is "incognito" then return "PRIVATE"' if kind == 'chrome' else '')
+    tab = ('current tab' if kind == 'safari' else 'active tab') + ' of front window'
+    title = '""' if kind == 'safari' else 'title of ' + tab
+    private = ('\n'.join([
+        'try', 'set privateMode to mode of front window',
+        'if privateMode is "incognito" then return "PRIVATE"',
+        'if privateMode is not "normal" then return "ERROR" & (ASCII character 31) & "privacy" & (ASCII character 31) & "0"',
+        'on error', 'if incognito of front window then return "PRIVATE"', 'end try',
+    ]) if kind == 'arc' else
+        'if mode of front window is "incognito" then return "PRIVATE"' if kind == 'chrome' else '')
     # Safari has no supported per-window private flag in its scripting dictionary.
     # It is intentionally domain-only, so page titles are not exposed there.
     return '\n'.join([
@@ -156,10 +161,11 @@ def browser_script(bundle, path=None):
         'set readStage to "window"', 'try',
         'with timeout of 2 seconds', f'tell {target}',
         # Arc can reject `count every window` although its front window works.
-        'set w to front window', 'set readStage to "privacy"',
-        private, 'set readStage to "tab"', f'set t to {tab} of w',
+        # Keep the index-based specifier. Arc can return window/tab objects that
+        # it subsequently rejects when sent back by ID (-1700).
+        'set readStage to "privacy"', private,
         'set readStage to "page"',
-        f'return (URL of t) & (ASCII character 31) & ({title})',
+        f'return (URL of {tab}) & (ASCII character 31) & ({title})',
         'end tell', 'end timeout', 'on error number readCode',
         'return "ERROR" & (ASCII character 31) & readStage & (ASCII character 31) & (readCode as text)',
         'end try',
