@@ -981,7 +981,8 @@ def configure_activity_details():
             _, row = card(rows)
             row.addWidget(label(name, 'sectionTitle'))
             row.addWidget(label('Сайты и названия страниц' if bundle != 'com.apple.Safari' else 'Домены сайтов'))
-            button = QPushButton('Разрешить доступ к ' + name)
+            row.addWidget(label(dock.detail_reader.status_message(bundle, dock.detail_status.get(bundle, 'empty')) if dock.detail_reader else activity_detail.STATUS['error']))
+            button = QPushButton('Проверить доступ к ' + name)
             def request_access(_=False, bundle=bundle, button=button):
                 if not dock.detail_reader:
                     info.setText('Сбор подробностей недоступен. Перезапусти Anki после обновления.')
@@ -992,7 +993,7 @@ def configure_activity_details():
                     button.setEnabled(True)
                     status = result[1] if result else 'error'
                     dock.detail_status[bundle] = status
-                    info.setText(activity_detail.STATUS.get(status, activity_detail.STATUS['error']))
+                    info.setText(dock.detail_reader.status_message(bundle, status))
                     update_home_widget()
                 dock.run(lambda: dock.detail_reader.browser(bundle, request_access=True), done)
             button.clicked.connect(request_access)

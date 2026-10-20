@@ -147,17 +147,22 @@ def browser_script(bundle, path=None):
     target = 'application ' + json.dumps(path, ensure_ascii=False) if path else 'application id ' + json.dumps(bundle)
     tab = 'current tab' if kind == 'safari' else 'active tab'
     title = '""' if kind == 'safari' else 'title of t'
-    private = ('if incognito of w then return "PRIVATE"' if kind == 'arc' else
+    private = ('try\nset privateMode to mode of w\nif privateMode is "incognito" then return "PRIVATE"\nif privateMode is not "normal" then return "ERROR" & (ASCII character 31) & "privacy" & (ASCII character 31) & "0"\non error\nif incognito of w then return "PRIVATE"\nend try' if kind == 'arc' else
                'if mode of w is "incognito" then return "PRIVATE"' if kind == 'chrome' else '')
     # Safari has no supported per-window private flag in its scripting dictionary.
     # It is intentionally domain-only, so page titles are not exposed there.
     return '\n'.join([
         f'if not ({target} is running) then return "NOT_RUNNING"',
+        'set readStage to "window"', 'try',
         'with timeout of 2 seconds', f'tell {target}',
-        'if (count of windows) is 0 then return "EMPTY"', 'set w to front window',
-        private, f'set t to {tab} of w',
+        # Arc can reject `count every window` although its front window works.
+        'set w to front window', 'set readStage to "privacy"',
+        private, 'set readStage to "tab"', f'set t to {tab} of w',
+        'set readStage to "page"',
         f'return (URL of t) & (ASCII character 31) & ({title})',
-        'end tell', 'end timeout',
+        'end tell', 'end timeout', 'on error number readCode',
+        'return "ERROR" & (ASCII character 31) & readStage & (ASCII character 31) & (readCode as text)',
+        'end try',
     ])
 
 
@@ -237,8 +242,20 @@ class NativeMetadata:
 class MacDetails:
     def __init__(self, native=None):
         self.native = native or NativeMetadata()
+        self.diagnostics = {}
+
+    def status_message(self, bundle, status):
+        message = STATUS.get(status, STATUS['error'])
+        diagnostic = self.diagnostics.get(bundle)
+        if diagnostic:
+            stage, code = diagnostic
+            names = {'window': 'окно', 'privacy': 'режим окна', 'tab': 'вкладка',
+                     'page': 'адрес и название', 'script': 'сценарий'}
+            message += ' · ' + names[stage] + ', код ' + str(code)
+        return message
 
     def browser(self, bundle, request_access=False):
+        self.diagnostics.pop(bundle, None)
         if not request_access and not self.native.automation_allowed(bundle):
             return None, 'permission'
         try:
@@ -247,8 +264,19 @@ class MacDetails:
         except subprocess.TimeoutExpired:
             return None, 'timeout'
         if result.returncode:
-            return None, 'permission' if '-1743' in result.stderr else 'error'
+            # Persist neither stderr nor URLs: error text can contain a page title.
+            match = re.search(r'\((-?\d{1,6})\)\s*$', result.stderr)
+            code = int(match[1]) if match else 0
+            self.diagnostics[bundle] = ('script', code)
+            return None, {-1743: 'permission', -1712: 'timeout', -600: 'not_running'}.get(code, 'error')
         raw = result.stdout.rstrip('\r\n')
+        if raw.startswith('ERROR' + chr(31)):
+            pieces = raw.split(chr(31))
+            if len(pieces) == 3 and pieces[1] in ('window', 'privacy', 'tab', 'page') and re.fullmatch(r'-?\d{1,6}', pieces[2]):
+                code = int(pieces[2])
+                self.diagnostics[bundle] = (pieces[1], code)
+                return None, {-1743: 'permission', -1712: 'timeout', -600: 'not_running'}.get(code, 'error')
+            return None, 'error'
         if raw == 'NOT_RUNNING':
             return None, 'not_running'
         if raw == 'PRIVATE':

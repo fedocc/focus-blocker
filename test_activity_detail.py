@@ -66,6 +66,8 @@ class DetailTests(unittest.TestCase):
         source = detail.browser_script('company.thebrowser.Browser')
         self.assertIn('is running', source)
         self.assertIn('incognito of w', source)
+        self.assertIn('mode of w', source)
+        self.assertNotIn('count of windows', source)
         self.assertNotIn('activate', source)
         self.assertNotIn('execute javascript', source)
         with self.assertRaises(ValueError):
@@ -85,6 +87,20 @@ class DetailTests(unittest.TestCase):
             self.assertNotIn('shell', run.call_args.kwargs)
         with patch.object(detail.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='NOT_RUNNING\n')):
             self.assertEqual(reader.browser('company.thebrowser.Browser', request_access=True), (None, 'not_running'))
+
+    def test_browser_diagnostics_keep_only_stage_and_error_number(self):
+        bundle = 'company.thebrowser.Browser'
+        reader = detail.MacDetails(SimpleNamespace(automation_allowed=lambda _: True))
+        for stage, code, status in [('window', -1728, 'error'), ('privacy', -1743, 'permission'), ('tab', -1712, 'timeout')]:
+            output = 'ERROR\x1f' + stage + '\x1f' + str(code) + '\n'
+            with patch.object(detail.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=output)):
+                self.assertEqual(reader.capture(bundle, 123), (None, status))
+                self.assertEqual(reader.diagnostics[bundle], (stage, code))
+                self.assertIn(str(code), reader.status_message(bundle, status))
+        with patch.object(detail.subprocess, 'run', return_value=SimpleNamespace(returncode=1, stdout='', stderr='Private page https://secret.test?token=hidden (-1728)\n')):
+            self.assertEqual(reader.capture(bundle, 123), (None, 'error'))
+            self.assertEqual(reader.diagnostics[bundle], ('script', -1728))
+            self.assertNotIn('secret', reader.status_message(bundle, 'error'))
 
     def test_window_access_failure_keeps_app_totals_available(self):
         reader = detail.MacDetails(SimpleNamespace(window_title=lambda _: ('', 'accessibility')))

@@ -28,6 +28,9 @@ const markup=usageMarkup(rows[0],400);
 assert.ok(markup.includes('data-expand="arc" open'));
 assert.ok(markup.includes('data-expand="arc|site:docs.test" open'));
 assert.ok(markup.includes('Без детализации'));assert.ok(markup.includes('&lt;img'));assert.ok(!markup.includes('<img'));
+for(const row of [{id:'terminal',name:'Terminal',seconds:50},{id:'arc',name:'Arc',seconds:50,details:{}},{id:'arc',name:'Arc',seconds:50,details:{a:{kind:'site',group:'docs.test',name:'A',seconds:0}}}]){
+ const plain=usageMarkup(row,100);assert.ok(!plain.includes('<details'));assert.ok(!plain.includes('ss-chevron'));assert.ok(plain.includes('50 с · 50%'));assert.ok(plain.includes('ss-track'));
+}
 let focused=false;
 const body={scrollTop:0,querySelectorAll:()=>[{dataset:{expand:'arc'},querySelector:()=>({focus:options=>focused=options.preventScroll})}]};
 restoreDetails(body,'arc');assert.equal(body.scrollTop,123);assert.equal(focused,true);
@@ -159,7 +162,7 @@ with tempfile.TemporaryDirectory() as folder:
     def configure_details():
         dialog=app.activeModalWidget()
         texts=[button.text() for button in dialog.findChildren(ui.QPushButton)]
-        assert 'Разрешить доступ к Arc' in texts
+        assert 'Проверить доступ к Arc' in texts
         assert not any('Terminal' in text for text in texts)
         dialog.findChild(ui.QCheckBox).setChecked(False)
         dialog.accept()

@@ -134,7 +134,7 @@
  }
  function usageGroups(row){
   const groups={};
-  Object.entries(row.details).forEach(([id,item])=>{
+  Object.entries(row.details||{}).filter(([,item])=>item.seconds>0).forEach(([id,item])=>{
    const key=item.kind+':'+item.group;
    const group=groups[key]??={key,name:item.group,kind:item.kind,seconds:0,items:[]};
    group.seconds+=item.seconds;group.items.push({...item,id});
@@ -144,6 +144,8 @@
  const usageFmt=s=>s<60?Math.floor(s)+' с':fmt(s);
  function usageMarkup(row,total){
   const groups=usageGroups(row),known=groups.reduce((sum,g)=>sum+g.seconds,0);
+  const head=`<div class="ss-usage-head"><span class="ss-app-title">${groups.length?'<i class="ss-chevron" aria-hidden="true">›</i>':''}<span title="${esc(row.name)}">${esc(row.name)}</span></span><span class="ss-usage-time">${usageFmt(row.seconds)} · ${total?Math.round(row.seconds/total*100):0}%</span></div><div class="ss-track"><div style="width:${total?row.seconds/total*100:0}%"></div></div>`;
+  if(!groups.length)return `<div class="ss-app-usage">${head}</div>`;
   const itemMarkup=item=>`<div class="ss-usage-item"><span title="${esc(item.name)}">${esc(item.name)}</span><span class="ss-usage-time">${usageFmt(item.seconds)}</span></div>`;
   const content=groups.map(group=>{
    if(group.kind!=='site')return `<div class="ss-usage-group-title">${esc(group.name)}</div>`+group.items.sort((a,b)=>b.seconds-a.seconds).map(itemMarkup).join('');
@@ -154,7 +156,7 @@
   const supported=(model.data.detail_supported||[]).includes(row.id);
   const note=model.data.detail_messages?.[status]||(!supported?'Для этого приложения учитывается общее время.':'Подробности появятся в новых блоках после разрешения доступа.');
   const unknown=Math.max(0,row.seconds-known);
-  return `<details class="ss-app-usage" data-expand="${esc(row.id)}"${model.expanded.has(row.id)?' open':''}><summary><div class="ss-usage-head"><span class="ss-app-title"><i class="ss-chevron" aria-hidden="true">›</i><span title="${esc(row.name)}">${esc(row.name)}</span></span><span class="ss-usage-time">${usageFmt(row.seconds)} · ${total?Math.round(row.seconds/total*100):0}%</span></div><div class="ss-track"><div style="width:${total?row.seconds/total*100:0}%"></div></div></summary><div class="ss-usage-children">${content}${unknown?`<div class="ss-usage-item ss-unassigned"><span>Без детализации</span><span class="ss-usage-time">${usageFmt(unknown)}</span></div>`:''}${!groups.length||status&&status!=='ready'?`<div class="ss-muted ss-usage-note">${esc(note)}</div>`:''}</div></details>`;
+  return `<details class="ss-app-usage" data-expand="${esc(row.id)}"${model.expanded.has(row.id)?' open':''}><summary>${head}</summary><div class="ss-usage-children">${content}${unknown?`<div class="ss-usage-item ss-unassigned"><span>Без детализации</span><span class="ss-usage-time">${usageFmt(unknown)}</span></div>`:''}${status&&status!=='ready'?`<div class="ss-muted ss-usage-note">${esc(note)}</div>`:''}</div></details>`;
  }
  function restoreDetails(body,focusKey){
   body.scrollTop=model.detailScroll[model.tab]||0;

@@ -18,7 +18,7 @@ ADDON_FILES = ('__init__.py', 'bridge.py', 'dashboard.py', 'analytics.py', 'acti
                    for theme in ('skyline', 'sea', 'architecture', 'amg', 'rolls', 'goggins')
                    for scene in ('predawn', 'dawn', 'morning', 'day', 'golden', 'evening', 'night'))
 SOURCE_FILES = ('README.md', 'AGENTS.md', 'START_HERE.md', 'CODEX_SETUP.md', 'doctor.py',
-                'install.py', 'install-study.command', 'repair-study.command', 'repair-study.applescript',
+                'install.py', 'install-study.command', 'wait_study_idle.py', 'repair-study.command', 'repair-study.applescript',
                 'focus-helper', 'focus_open.py', 'focus_youtube_guard.py', 'focus_service_policy.py',
                 'focus_playlist_sync.py', 'focus_study.py', 'youtube-policy.json',
                 'theme/focus-study.onigiri')
