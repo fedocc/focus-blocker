@@ -91,7 +91,11 @@ class StudyTests(unittest.TestCase):
 
     def test_alternating_mandatory_breaks_and_five_plus_optional_progress(self):
         for index in range(1, 7):
-            self.start()
+            session = self.start()
+            finished = self.state(4800)
+            self.assertTrue(finished['session']['awaiting_rest'])
+            self.assertEqual(finished['session']['phase'], 'focus')
+            study.start_break({'session_id': session['id']}, self.boot, self.now + 4800, self.mono + 4800)
             finished = self.state(4800)
             self.assertEqual(finished['completed_today'], index)
             rest = 1800 if index % 2 == 0 else 600
@@ -101,6 +105,43 @@ class StudyTests(unittest.TestCase):
             self.assertIsNone(self.state(4800 + rest)['session'])
             self.now += 4800 + rest
             self.mono += 4800 + rest
+
+    def test_overtime_keeps_protection_and_full_break_needs_explicit_confirmation(self):
+        session = self.start()
+        for request in ({'session_id': session['id']}, {'session_id': session['id'], 'seconds': 1}):
+            with self.assertRaises((RuntimeError, ValueError)):
+                study.start_break(request, self.boot, self.now + 100, self.mono + 100)
+        value = self.state(5400)
+        self.assertEqual(value['history'], [])
+        self.assertEqual(value['session']['overtime_seconds'], 600)
+        self.assertEqual(value['session']['apps'], session['apps'])
+        with self.assertRaises(RuntimeError):
+            study.start(self.request, self.boot, self.now + 5400, self.mono + 5400)
+        study.record_attempt('app', 'com.example.Game')
+        rest = study.start_break({'session_id': session['id']}, self.boot, self.now + 5520, self.mono + 5520)
+        self.assertEqual(rest['remaining'], 600)
+        value = self.state(5520)
+        self.assertEqual(value['completed_today'], 1)
+        self.assertEqual(value['history'][0]['seconds'], 5520)
+        self.assertEqual(value['history'][0]['overtime_seconds'], 720)
+        self.assertEqual(value['history'][0]['app_attempts'], {'com.example.Game': 1})
+        self.assertIsNone(value['last_emergency'])
+        retry = study.start_break({'session_id': session['id']}, self.boot, self.now + 5530, self.mono + 5530)
+        self.assertEqual(retry['remaining'], 590)
+        self.assertEqual(len(study.read()['history']), 1)
+        self.assertIsNone(self.state(6120)['session'])
+
+    def test_overtime_reboot_preserves_checkpoint_without_offline_or_clock_credit(self):
+        session = self.start()
+        self.state(5100)
+        value = study.status('boot-2', self.now + 80000, 100)
+        self.assertEqual(value['session']['overtime_seconds'], 300)
+        value = study.status('boot-2', self.now - 86400, 160)
+        self.assertEqual(value['session']['overtime_seconds'], 360)
+        with self.assertRaises(RuntimeError):
+            study.start_break({'session_id': 'wrong'}, 'boot-2', self.now, 160)
+        with self.assertRaisesRegex(RuntimeError, 'экстренный выход не нужен'):
+            study.request_emergency({'session_id': session['id'], 'reason': 'Достаточно длинная причина'}, 'boot-2', self.now, 160)
 
     def test_wall_clock_changes_cannot_finish_or_extend_focus(self):
         self.start()
@@ -172,6 +213,8 @@ class StudyTests(unittest.TestCase):
         study.record_attempt('site', 'youtube')
         study.record_attempt('app', 'com.example.Game')
         value = self.state(4800)
+        study.start_break({'session_id': value['session']['id']}, self.boot, self.now + 4800, self.mono + 4800)
+        value = self.state(4800)
         self.assertEqual(value['history'][-1]['attempts'], {'youtube': 1})
         self.assertEqual(value['history'][-1]['app_attempts'], {'com.example.Game': 1})
         self.assertEqual(value['attempts_today'], 2)
@@ -201,6 +244,22 @@ class StudyHelperTests(unittest.TestCase):
     def setUp(self):
         guards.RootIntegrationTests.setUp(self)
         helper.HOSTS.write_text(helper.HOSTS.read_text() + '# === FOCUS_BLOCK:STUDY_WEB START ===\n127.0.0.1 tiktok.com\n# === FOCUS_BLOCK:STUDY_WEB END ===\n')
+
+    def test_overtime_guard_and_explicit_rest_command_use_the_protected_session(self):
+        session = study.start({'task': {'title': 'Учёба'}, 'apps': []}, 'test-boot', 1000, 100)
+        with patch.object(study, 'clock', return_value=5500), patch.object(study.time, 'time', return_value=6400):
+            with patch.object(guard, 'user_script', return_value='com.example.Game'):
+                helper.guard_study_apps()
+            self.assertTrue(study.read()['session']['awaiting_rest'])
+            with self.assertRaises(RuntimeError):
+                helper.lease('instagram', 120)
+            output = io.StringIO()
+            with patch.object(sys, 'argv', ['focus-helper', 'study-break-start']), patch.object(sys, 'stdin', io.StringIO(json.dumps({'session_id': session['id']}))), patch.object(helper.os, 'geteuid', return_value=0), contextlib.redirect_stdout(output):
+                helper.main()
+            self.assertEqual(json.loads(output.getvalue())['remaining'], 600)
+            self.assertEqual(study.read()['history'][0]['app_attempts'], {'com.example.Game': 1})
+            self.assertEqual(study.read()['history'][0]['overtime_seconds'], 600)
+
     def test_study_blocks_social_and_ordinary_youtube_grants(self):
         study.start({'task': {'title': 'Учёба'}, 'apps': []}, 'test-boot')
         for service, scope in (('telegram', None), ('instagram', None), ('x', None),

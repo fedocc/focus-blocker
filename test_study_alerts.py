@@ -8,6 +8,26 @@ def state(phase=None, key='one', end=1600):
 
 
 class AlertTests(unittest.TestCase):
+    def test_confirmed_rest_alerts_before_rest_and_only_again_at_its_end(self):
+        preferences = {}
+        gate = bridge.PhaseAlerts(preferences)
+        pending = state('focus')
+        pending['session']['awaiting_rest'] = True
+        pending['supports_confirmed_break'] = True
+        self.assertEqual(gate.observe(pending, 1000)['kind'], 'overtime')
+        self.assertEqual(bridge.PhaseAlerts(preferences).observe(pending, 1100)['kind'], 'overtime')
+        rest = dict(state('break'), supports_confirmed_break=True)
+        self.assertIsNone(gate.observe(rest, 1100), 'explicit start is already confirmation')
+        self.assertIsNone(bridge.PhaseAlerts(preferences).observe(rest, 1200))
+        self.assertEqual(gate.observe(state(), 1600)['kind'], 'ready')
+
+    def test_overtime_display_interpolates_from_protected_checkpoint(self):
+        value = {'session': {'awaiting_rest': True, 'overtime_seconds': 120, 'overtime_anchor_mono': 100}}
+        with patch.object(bridge.time, 'clock_gettime', return_value=105):
+            self.assertEqual(bridge.overtime_seconds(value), 125)
+        value['session']['awaiting_rest'] = False
+        self.assertEqual(bridge.overtime_seconds(value), 0)
+
     def test_break_is_noticed_on_transition_and_reopening_anki(self):
         preferences = {}
         gate = bridge.PhaseAlerts(preferences)

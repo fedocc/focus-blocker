@@ -11,6 +11,28 @@ def timestamp(text):
 
 
 class AnalyticsTests(unittest.TestCase):
+    def test_overtime_is_extra_time_in_one_block_and_survives_local_history(self):
+        now = timestamp('2026-10-20T00:05:00')
+        session = {'id': 'overtime', 'phase': 'focus', 'awaiting_rest': True, 'remaining': 0,
+                   'overtime_seconds': 600}
+        result = snapshot({'session': session}, now=now, overtime=660)
+        self.assertEqual(sum(row['seconds'] for row in result['days'].values()), 5460)
+        self.assertEqual(result['days']['2026-10-19']['overtime_seconds'], 360)
+        self.assertEqual(result['days']['2026-10-20']['overtime_seconds'], 300)
+        record = dict(session, seconds=5460, overtime_seconds=660, ended_at=now, outcome='completed')
+        with tempfile.TemporaryDirectory() as folder:
+            tracker = UsageTracker(Path(folder) / 'stats.sqlite3')
+            tracker.remember([record])
+            result = snapshot({'history': list(tracker.blocks.values()), 'session': dict(session, phase='break')}, now=now)
+            self.assertEqual(len(result['records']), 1)
+            self.assertEqual(result['records'][0]['overtime_seconds'], 660)
+            self.assertEqual(result['days']['2026-10-20']['completed'], 1)
+            self.assertEqual(sum(row['seconds'] for row in result['days'].values()), 5460)
+            tracker.sample({'session': session}, ('code', 'VS Code'), now, 100)
+            tracker.sample({'session': session}, ('code', 'VS Code'), now+5, 105)
+            self.assertEqual(tracker.summary()['days']['2026-10-20']['code']['seconds'], 5)
+            tracker.close()
+
     def test_technical_repair_is_kept_but_excluded_from_study_metrics(self):
         now = timestamp('2026-10-19T19:00:00')
         record = {'id': 'repair', 'outcome': 'interrupted', 'reason': REPAIR_REASON,

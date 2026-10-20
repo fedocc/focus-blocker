@@ -56,7 +56,8 @@ class PolicyAndMigrationTests(unittest.TestCase):
     def test_sudo_exception_has_exact_scope_and_all_guard_commands(self):
         rule = install.sudoers_text('focus_test')
         commands = rule.split('NOPASSWD: ')[1].strip().split(', ')
-        self.assertEqual(len(commands), 15)
+        self.assertEqual(len(commands), 16)
+        self.assertIn(str(install.BASE / 'focus-helper') + ' study-break-start', commands)
         self.assertIn(str(install.BASE / 'focus-helper') + ' lease x', commands)
         self.assertIn(str(install.BASE / 'focus-helper') + ' youtube-duration', commands)
         self.assertFalse(any('*' in c or c.endswith(' daemon') or 'vkvideo' in c for c in commands))

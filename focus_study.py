@@ -83,28 +83,59 @@ def advance(value, now, mono, boot):
         # Reboot resumes the last saved remaining time, rather than earning
         # credit while the machine was off or silently cancelling a block.
         session.update(boot=boot, deadline_mono=mono + session['remaining'])
+        if session.get('awaiting_rest'):
+            session['overtime_anchor_mono'] = mono
         if session.get('emergency'):
             session['emergency'].update(boot=boot, ready_mono=mono + EMERGENCY_WAIT)
     session['remaining'] = max(0, session['deadline_mono'] - mono)
     session['ends_at'] = now + session['remaining']
     if session.get('emergency') and mono > session['emergency']['ready_mono'] + 120:
         session['emergency'] = None
+    if session.get('awaiting_rest'):
+        session['overtime_seconds'] += max(0, mono - session['overtime_anchor_mono'])
+        session['overtime_anchor_mono'] = mono
+        return True
     if session['remaining'] > 0:
         return True
     if session['phase'] == 'focus':
-        ended = {k: copy.deepcopy(session[k]) for k in
-                 ('id', 'task', 'apps', 'started_at', 'attempts', 'app_attempts')}
-        ended.update(ended_at=now, outcome='completed', seconds=FOCUS)
-        value['history'].append(ended)
-        value['history'] = value['history'][-1000:]
-        rest = 30 * 60 if completed_today(value, now) % 2 == 0 else 10 * 60
-        # Start the full break when completion is first observed. A suspended
-        # daemon cannot accidentally skip both a block and its recovery time.
-        session.update(phase='break', remaining=rest, deadline_mono=mono + rest,
-                       ends_at=now + rest, emergency=None)
+        # Completion of the minimum is not permission to start the break.
+        # Keep the committed app/site restrictions until explicit confirmation.
+        session.update(awaiting_rest=True,
+                       overtime_seconds=max(0, mono - session['deadline_mono']),
+                       overtime_anchor_mono=mono, emergency=None)
     else:
         value['session'] = None
     return True
+
+
+def start_break(request, boot, now=None, mono=None):
+    """End this focus block and start its full break, once and only once."""
+    now = time.time() if now is None else now
+    mono = clock() if mono is None else mono
+    if not isinstance(request, dict) or set(request) != {'session_id'}:
+        raise ValueError('Нужен идентификатор блока')
+    value = read()
+    advance(value, now, mono, boot)
+    session = value['session']
+    if not session or session['id'] != request['session_id']:
+        raise RuntimeError('Блок уже изменился. Обнови состояние.')
+    if session['phase'] == 'break':
+        save(value)
+        return copy.deepcopy(session)  # Retrying never resets the rest deadline.
+    if not session.get('awaiting_rest'):
+        save(value)
+        raise RuntimeError('Сначала заверши 80 минут учебного блока.')
+    extra = session['overtime_seconds']
+    ended = {k: copy.deepcopy(session[k]) for k in
+             ('id', 'task', 'apps', 'started_at', 'attempts', 'app_attempts')}
+    ended.update(ended_at=now, outcome='completed', seconds=FOCUS + extra,
+                 overtime_seconds=extra)
+    value['history'] = (value['history'] + [ended])[-1000:]
+    rest = 30 * 60 if completed_today(value, now) % 2 == 0 else 10 * 60
+    session.update(phase='break', remaining=rest, deadline_mono=mono + rest,
+                   ends_at=now + rest, emergency=None, awaiting_rest=False)
+    save(value)
+    return copy.deepcopy(session)
 
 
 def status(boot, now=None, mono=None):
@@ -174,6 +205,8 @@ def require_focus(value, session_id):
     session = value['session']
     if not session or session['phase'] != 'focus' or session['id'] != session_id:
         raise RuntimeError('Блок уже изменился. Обнови состояние.')
+    if session.get('awaiting_rest'):
+        raise RuntimeError('80 минут выполнены. Нажми «Начать отдых» — экстренный выход не нужен.')
     return session
 
 

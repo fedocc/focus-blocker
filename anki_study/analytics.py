@@ -25,7 +25,7 @@ def intervals(end, seconds):
         cursor = stop
 
 
-def snapshot(state, usage=None, now=None, remaining=None):
+def snapshot(state, usage=None, now=None, remaining=None, overtime=None):
     now = time.time() if now is None else now
     today = day(now)
     days = {}
@@ -41,16 +41,20 @@ def snapshot(state, usage=None, now=None, remaining=None):
         records.append(item)
     session = (state or {}).get('session')
     if session and session.get('phase') == 'focus' and session.get('id') not in seen:
-        seconds = max(0, min(4800, 4800 - (remaining if remaining is not None else session.get('remaining', 4800))))
-        records.append(dict(session, seconds=seconds, ended_at=now, outcome='live'))
+        extra = max(0, overtime if overtime is not None else session.get('overtime_seconds', 0)) if session.get('awaiting_rest') else 0
+        seconds = max(0, min(4800, 4800 - (remaining if remaining is not None else session.get('remaining', 4800)))) + extra
+        records.append(dict(session, seconds=seconds, overtime_seconds=extra, ended_at=now, outcome='live'))
     for item in records:
         if item['outcome'] == 'repair':
             continue  # Service repair is visible in history, not a failed study attempt.
-        seconds = max(0, min(4800, float(item.get('seconds', 0))))
+        seconds = max(0, float(item.get('seconds', 0)))
+        extra = max(0, min(seconds, float(item.get('overtime_seconds', 0))))
         end = item.get('ended_at', now)
         for key, portion in intervals(end, seconds):
-            days.setdefault(key, {'seconds': 0, 'completed': 0, 'interrupted': 0, 'attempts': 0})['seconds'] += portion
-        row = days.setdefault(day(end), {'seconds': 0, 'completed': 0, 'interrupted': 0, 'attempts': 0})
+            days.setdefault(key, {'seconds': 0, 'overtime_seconds': 0, 'completed': 0, 'interrupted': 0, 'attempts': 0})['seconds'] += portion
+        for key, portion in intervals(end, extra):
+            days[key]['overtime_seconds'] += portion
+        row = days.setdefault(day(end), {'seconds': 0, 'overtime_seconds': 0, 'completed': 0, 'interrupted': 0, 'attempts': 0})
         if item['outcome'] != 'live':
             row[item['outcome']] += 1
         row['attempts'] += sum(item.get('attempts', {}).values()) + sum(item.get('app_attempts', {}).values())
@@ -64,7 +68,8 @@ def snapshot(state, usage=None, now=None, remaining=None):
     return {'today': today, 'days': days, 'streak': streak, 'records': [
         {'id': item.get('id'), 'day': day(item.get('ended_at', now)),
          'ended_at': item.get('ended_at', now), 'seconds': item.get('seconds', 0),
-         'outcome': item['outcome'], 'title': item.get('task', {}).get('title', 'Учебный блок'),
+         'outcome': item['outcome'], 'overtime_seconds': item.get('overtime_seconds', 0),
+         'title': item.get('task', {}).get('title', 'Учебный блок'),
          'tasks': [task.get('title', '') for task in item.get('task', {}).get('items', [item.get('task', {})])],
          'attempts': sum(item.get('attempts', {}).values()) + sum(item.get('app_attempts', {}).values())}
         for item in records], 'usage': usage or {}}
@@ -95,7 +100,7 @@ class UsageTracker:
             if not key or key in self.blocks:
                 continue
             task = record.get('task', {})
-            clean = {k: record[k] for k in ('id', 'seconds', 'ended_at', 'outcome', 'attempts', 'app_attempts', 'reason') if k in record}
+            clean = {k: record[k] for k in ('id', 'seconds', 'overtime_seconds', 'ended_at', 'outcome', 'attempts', 'app_attempts', 'reason') if k in record}
             clean['task'] = {'title': task.get('title', 'Учебный блок')}
             if task.get('items'):
                 clean['task']['items'] = [{'title': item.get('title', '')} for item in task['items']]
@@ -108,7 +113,7 @@ class UsageTracker:
     def sample(self, state, app, now, mono, fresh=True):
         session = (state or {}).get('session') or {}
         current = None
-        if fresh and session.get('phase') == 'focus' and app and session.get('remaining', 0) > 0:
+        if fresh and session.get('phase') == 'focus' and app and (session.get('remaining', 0) > 0 or session.get('awaiting_rest')):
             current = (session['id'], app[0], app[1], now, mono)
         prev = self.previous
         self.previous = current

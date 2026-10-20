@@ -43,7 +43,7 @@
  const duration=r=>Math.max(0,Number(r.seconds)||0);
  function aggregate(){
   const rows=Object.entries(model.data.days).filter(([key])=>inRange(key)).map(([,row])=>row);
-  return rows.reduce((s,r)=>({seconds:s.seconds+r.seconds,completed:s.completed+r.completed,interrupted:s.interrupted+r.interrupted,attempts:s.attempts+r.attempts}),{seconds:0,completed:0,interrupted:0,attempts:0});
+  return rows.reduce((s,r)=>({seconds:s.seconds+r.seconds,overtime:s.overtime+(r.overtime_seconds||0),completed:s.completed+r.completed,interrupted:s.interrupted+r.interrupted,attempts:s.attempts+r.attempts}),{seconds:0,overtime:0,completed:0,interrupted:0,attempts:0});
  }
  function spark(values){
   const max=Math.max(1,...values),points=values.map((v,i)=>`${i/(values.length-1)*100},${26-v/max*24}`);
@@ -55,7 +55,7 @@
   const seven=Array.from({length:7},(_,i)=>model.data.days[shift(model.data.today,i-6)]||{seconds:0,completed:0,interrupted:0,attempts:0});
   const values=[
    ['✓','Блоки',a.completed,'бл.',model.period==='today'?a.completed+' из 5 основных':'Завершены полностью',seven.map(r=>r.completed),'#38d2b1'],
-   ['◷','Время',(a.seconds/3600).toFixed(1).replace('.',','),'ч','По таймеру · включая текущий блок',seven.map(r=>r.seconds),'#5ab8ed'],
+   ['◷','Время',(a.seconds/3600).toFixed(1).replace('.',','),'ч','По таймеру · включая текущий блок'+(a.overtime?' · дополнительно '+fmt(a.overtime):''),seven.map(r=>r.seconds),'#5ab8ed'],
    ['↗','Блокировки',a.attempts,'раз','Срабатывания защиты сайтов и приложений',seven.map(r=>r.attempts),'#e3bf86'],
    ['◇','Завершение',percent===null?'—':percent+'%','','Доля полных блоков · '+a.interrupted+' прервано',seven.map(r=>r.completed+r.interrupted?r.completed/(r.completed+r.interrupted)*100:0),'#c991df']
   ];
@@ -74,7 +74,9 @@
   return '<div class="ss-timeline">'+[...records].sort((a,b)=>b.ended_at-a.ended_at).map(r=>{
    const time=new Date(r.ended_at*1000).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'});
    const status={completed:'Завершён',interrupted:'Прерван',live:'Сейчас',repair:'Ремонт службы · вне показателей'}[r.outcome];
-   return `<div class="ss-record" title="${esc(r.tasks.join(' · '))}"><span class="ss-record-time">${time}</span><span class="ss-record-title">${esc(r.title)}<br><span class="ss-record-status ${r.outcome}">${status} · ${esc(r.day.slice(5))}</span></span><span>${fmt(duration(r))}</span></div>`;
+   const extra=Math.max(0,Number(r.overtime_seconds)||0);
+   const note=extra?' · дополнительно '+fmt(extra):'';
+   return `<div class="ss-record" title="${esc(r.tasks.join(' · ')+note)}"><span class="ss-record-time">${time}</span><span class="ss-record-title">${esc(r.title)}<br><span class="ss-record-status ${r.outcome}">${status} · ${esc(r.day.slice(5))}${note}</span></span><span>${fmt(duration(r))}</span></div>`;
   }).join('')+'</div>';
  }
  function decorateCalendar(){

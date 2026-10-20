@@ -13,7 +13,7 @@ from xml.parsers.expat import ExpatError
 
 ORIGIN = 'https://slovo.45-80-228-215.sslip.io'
 HELPER = '/Library/PrivilegedHelperTools/focus-open/focus-helper'
-COMMANDS = {'study-status', 'study-start', 'study-emergency-request', 'study-emergency-confirm'}
+COMMANDS = {'study-status', 'study-start', 'study-break-start', 'study-emergency-request', 'study-emergency-confirm'}
 
 
 class PhaseAlerts:
@@ -30,12 +30,17 @@ class PhaseAlerts:
         session = state.get('session')
         previous = self.previous
         candidate = None
-        if session and session['phase'] == 'break':
+        if session and session.get('awaiting_rest'):
+            candidate = {'id': session['id'], 'kind': 'overtime'}
+        elif session and session['phase'] == 'break':
             candidate = {'id': session['id'], 'kind': 'break', 'ends_at': session['ends_at']}
             saved = self.preferences.get('alert_last_break', {})
             if saved.get('id') != session['id']:
                 self.preferences['alert_last_break'] = dict(candidate)
                 self.dirty = True
+            if state.get('supports_confirmed_break'):
+                # The user just explicitly started this break; don't alert twice.
+                candidate = None
         elif not session:
             if previous and previous.get('phase') == 'break':
                 candidate = {'id': previous['id'], 'kind': 'ready'}
@@ -61,7 +66,7 @@ class PhaseAlerts:
 
 def play_alert_sound(kind='break'):
     """Normal media output: independent of notification banners and Focus mode."""
-    sound = Path('/System/Library/Sounds') / ('Glass.aiff' if kind == 'break' else 'Hero.aiff')
+    sound = Path('/System/Library/Sounds') / ('Glass.aiff' if kind in ('break', 'overtime') else 'Hero.aiff')
     if not sound.is_file() or not Path('/usr/bin/afplay').is_file():
         return None
     return subprocess.Popen(['/usr/bin/afplay', '-v', '1', str(sound)],
@@ -77,6 +82,15 @@ def remaining_seconds(state):
     if isinstance(deadline, (int, float)):
         return max(0, deadline - time.clock_gettime(time.CLOCK_MONOTONIC))
     return max(0, session['remaining'])
+
+
+def overtime_seconds(state):
+    session = (state or {}).get('session') or {}
+    if not session.get('awaiting_rest'):
+        return 0
+    anchor = session.get('overtime_anchor_mono')
+    elapsed = max(0, time.clock_gettime(time.CLOCK_MONOTONIC) - anchor) if isinstance(anchor, (int, float)) else 0
+    return max(0, session.get('overtime_seconds', 0)) + elapsed
 
 
 def block_task(tasks, custom_title=''):

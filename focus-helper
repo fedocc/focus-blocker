@@ -538,13 +538,16 @@ def main():
         duration = int(sys.stdin.read(16))
     if args == ['stop']:
         request = json.loads(sys.stdin.read(4096))
-    if args in (['study-start'], ['study-emergency-request'], ['study-emergency-confirm']):
+    if args in (['study-start'], ['study-break-start'], ['study-emergency-request'], ['study-emergency-confirm']):
         request = json.loads(sys.stdin.read(32768))
     with locked():
         if args == ['study-status']:
-            print(json.dumps(dict(study_status(), service_running=timer_running(), supports_task_groups=True), ensure_ascii=False))
+            print(json.dumps(dict(study_status(), service_running=timer_running(), supports_task_groups=True,
+                                  supports_confirmed_break=True), ensure_ascii=False))
         elif args == ['study-start']:
             print(json.dumps(start_study(request), ensure_ascii=False))
+        elif args == ['study-break-start']:
+            print(json.dumps(study_lock.start_break(request, boot_identity()), ensure_ascii=False))
         elif args == ['study-emergency-request']:
             print(json.dumps(study_lock.request_emergency(request, boot_identity()), ensure_ascii=False))
         elif args == ['study-emergency-confirm']:

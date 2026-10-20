@@ -141,6 +141,32 @@ with tempfile.TemporaryDirectory() as folder:
     notice.acknowledge()
     assert not notice.repeat.isActive() and notice.event is None
     assert ui.json.dumps(dock.state,sort_keys=True)==before_signal
+    # Silence and window closing are not permission to start the break.
+    pending={'id':'extra','phase':'focus','remaining':0,'awaiting_rest':True,'overtime_seconds':125,
+             'overtime_anchor_mono':ui.time.clock_gettime(ui.time.CLOCK_MONOTONIC),'task':{'title':'DL'}}
+    dock.state={'session':pending,'supports_confirmed_break':True,'service_running':True}
+    notice.observe(dock.state)
+    assert notice.event['kind']=='overtime' and notice.repeat.isActive()
+    assert notice.clock.text().startswith('+02:05')
+    notice.silent.setChecked(True)
+    assert not notice.repeat.isActive()
+    assert dock.preferences['alert_silent_overtime']=='extra'
+    notice.reject()
+    assert not notice.isVisible() and dock.state['session']['phase']=='focus'
+    notice.dismiss();notice.observe(dock.state)
+    assert notice.silent.isChecked() and not notice.repeat.isActive()
+    notice.close()
+    assert not dock.busy and dock.state['session']['phase']=='focus'
+    notice.show()
+    calls=[]
+    ui.bridge.helper=lambda command,payload=None: calls.append((command,payload)) or dict(pending,phase='break',awaiting_rest=False,remaining=600,ends_at=ui.time.time()+600)
+    dock.run=lambda work,done: done(work())
+    dock.poll=lambda:None
+    notice.acknowledge()
+    assert calls==[('study-break-start',{'session_id':'extra'})]
+    assert dock.state['session']['phase']=='break'
+    assert notice.event is None and not notice.repeat.isActive()
+    assert dock.state['session']['remaining']==600
     # Wrapping and boundary wheel handling do not depend on the outer dock.
     dock.state['session']=None
     long_tasks=[{'title':('Полное длинное название задачи без обрезки '*4)+str(i),'occurrence_id':str(i)} for i in range(12)]
