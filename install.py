@@ -118,7 +118,7 @@ def sudoers_text(username):
     helper = str(BASE / 'focus-helper')
     commands = ('check', 'restore', 'stop', 'lease youtube', 'lease instagram', 'lease x', 'lease telegram',
                 'guard-check', 'youtube-status', 'youtube-policy', 'youtube-duration',
-                'study-start', 'study-status', 'study-break-start', 'study-emergency-request', 'study-emergency-confirm')
+                'study-start', 'study-status', 'study-break-start', 'study-next-ready', 'study-next-update', 'study-next-start', 'study-emergency-request', 'study-emergency-confirm')
     return username + ' ALL=(root) NOPASSWD: ' + ', '.join(helper + ' ' + c for c in commands) + '\n'
 
 
@@ -173,7 +173,7 @@ def interrupt_for_repair(value, now):
         if session.get('phase') != 'focus':
             raise ValueError('Ремонтная остановка предназначена для активного учебного блока.')
         entry = {k: copy.deepcopy(session[k]) for k in ('id', 'task', 'apps', 'started_at', 'attempts', 'app_attempts')}
-        entry.update(ended_at=now, outcome='interrupted', seconds=max(0, 4800 - session['remaining']),
+        entry.update(ended_at=now, outcome='interrupted', seconds=max(0, session.get('focus_seconds', 4800) - session['remaining']) + session.get('overtime_seconds', 0),
                      reason='Остановка зависшего блока при ремонте службы по запросу пользователя')
         value['history'] = (value['history'] + [entry])[-1000:]
         value['last_emergency'] = now

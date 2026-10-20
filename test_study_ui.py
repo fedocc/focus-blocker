@@ -9,6 +9,84 @@ import unittest
 
 
 class StudyUiTests(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec('aqt'), 'Anki Qt is unavailable in this Python')
+    def test_pomodoro_ui_rest_cover_preparation_autostart_and_quick_exit(self):
+        program = r'''
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+from aqt.qt import QApplication, QMainWindow, Qt
+from anki_study import dashboard as ui
+import focus_study as study
+app=QApplication([])
+window=QMainWindow();window.col=None;ui.mw=window
+ui.bridge.applications=lambda:[('company.thebrowser.Browser','Arc'),('us.zoom.xos','Zoom')]
+ui.bridge.play_alert_sound=lambda *_:None
+ui.QApplication.beep=lambda:None
+ui.bridge.remaining_seconds=lambda state:((state or {}).get('session') or {}).get('remaining',4800)
+ui.bridge.overtime_seconds=lambda state:((state or {}).get('session') or {}).get('overtime_seconds',0)
+with tempfile.TemporaryDirectory() as folder:
+    ui.PREFS=Path(folder)/'preferences.json';study.STATE=Path(folder)/'study.json'
+    times=[1792494000,100]
+    def command(name,payload=None):
+        now,mono=times
+        if name=='study-status':
+            return dict(study.status('test',now,mono),service_running=True,supports_pomodoro=True,supports_simple_emergency=True,supports_confirmed_break=True)
+        if name=='study-break-start':return study.start_break(payload,'test',now,mono)
+        if name.startswith('study-next-'):return study.next_block(payload,'test',now,mono,action=name.removeprefix('study-next-'))
+        if name=='study-emergency-request':return study.request_emergency(payload,'test',now,mono)
+        if name=='study-emergency-confirm':return study.confirm_emergency(payload,'test',now,mono)
+        raise AssertionError(name)
+    ui.bridge.helper=command
+    ui.StudyDock.run=lambda self,work,done:done(work())
+    dock=ui.StudyDock();window._slovo_study_dock=dock
+    window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,dock)
+    study.start({'task':{'title':'Lecture'},'apps':['company.thebrowser.Browser'],'preset':'pomo25','auto_continue':True,'blocks':4,'blackout':True},'test',*times)
+    dock.poll();assert not dock.mode.isEnabled() and not dock.can_edit()
+    times[0]+=1500;times[1]+=1500;dock.poll()
+    assert dock.phase_notice.event['kind']=='overtime'
+    assert dock.phase_notice.headline.text()=='25 МИНУТ ВЫПОЛНЕНЫ'
+    dock.begin_rest();dock.poll()
+    assert dock.state['session']['phase']=='break'
+    assert dock.rest_screen.windows and all(w.isVisible() for w in dock.rest_screen.windows)
+    w=dock.rest_screen.windows[0]
+    assert w.back.isHidden() and w.clock.text()=='05:00'
+    w.close();assert w.isVisible(),'closing cannot skip mandatory rest'
+    w.grab().save('/tmp/focus-pomodoro-rest-preview.png')
+    times[0]+=300;times[1]+=300;dock.poll()
+    assert not w.back.isHidden() and dock.state['session']['phase']=='ready'
+    w.back.click()
+    assert dock.state['session']['phase']=='prepare' and dock.can_edit()
+    assert not w.isVisible() and not dock.mode.isEnabled()
+    assert dock.start.isEnabled() and 'Начать сейчас' in dock.start.text()
+    task={'title':'Zoom lecture','occurrence_id':'zoom','url':ui.bridge.ORIGIN+'/?task=zoom'}
+    dock.tasks=[task];dock.render_tasks(dock.tasks)
+    dock.task_list.item(0).setCheckState(Qt.CheckState.Checked)
+    for i in range(dock.apps.count()):
+        item=dock.apps.item(i)
+        if item.data(Qt.ItemDataRole.UserRole)=='us.zoom.xos':item.setCheckState(Qt.CheckState.Checked)
+    dock.next_save.stop();dock.save_next_selection()
+    assert study.read()['session']['task']['title']=='Zoom lecture'
+    assert 'us.zoom.xos' in study.read()['session']['apps']
+    dock.resize(400,1000);dock.show();window.show();app.processEvents()
+    dock.grab().save('/tmp/focus-pomodoro-controls-preview.png')
+    times[0]+=120;times[1]+=120;dock.poll()
+    assert dock.state['session']['phase']=='focus' and not dock.can_edit()
+    assert dock.state['session']['task']['title']=='Zoom lecture'
+    with patch.object(ui.QMessageBox,'question',return_value=ui.QMessageBox.StandardButton.Yes),patch.object(ui.QInputDialog,'getText',return_value=('ПОДТВЕРЖДАЮ',True)):
+        dock.request_emergency()
+    assert dock.state['session'] is None and study.read()['last_emergency']==times[0]
+    assert not study.emergency_available(study.read(),times[0])
+    dock.poller.stop();dock.display_timer.stop();dock.next_save.stop()
+    dock.phase_notice.dismiss();dock.rest_screen.dispose();dock.close()
+window.close()
+print('Pomodoro UI: passed')
+'''
+        result = subprocess.run([sys.executable, '-c', program], cwd=Path(__file__).parent,
+                                env=dict(os.environ, QT_QPA_PLATFORM='offscreen'),
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(shutil.which('node'), 'Node is unavailable')
     def test_usage_breakdown_aggregates_days_escapes_titles_and_keeps_expansion_and_scroll(self):
         source = (Path(__file__).parent / 'anki_study/focus-stats.js').read_text()

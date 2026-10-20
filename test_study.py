@@ -140,8 +140,8 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(value['session']['overtime_seconds'], 360)
         with self.assertRaises(RuntimeError):
             study.start_break({'session_id': 'wrong'}, 'boot-2', self.now, 160)
-        with self.assertRaisesRegex(RuntimeError, 'экстренный выход не нужен'):
-            study.request_emergency({'session_id': session['id'], 'reason': 'Достаточно длинная причина'}, 'boot-2', self.now, 160)
+        result = study.request_emergency({'session_id': session['id'], 'reason': 'Экстренный выход'}, 'boot-2', self.now, 160)
+        self.assertEqual(result['wait_seconds'], 0)
 
     def test_wall_clock_changes_cannot_finish_or_extend_focus(self):
         self.start()
@@ -160,14 +160,16 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(value['session']['remaining'], 3600)
         self.assertEqual(value['completed_today'], 0)
 
-    def test_emergency_needs_reason_wait_and_exact_confirmation(self):
+    def test_emergency_needs_request_and_exact_confirmation_without_wait(self):
         session = self.start()
         with self.assertRaises(ValueError):
-            study.request_emergency({'session_id': session['id'], 'reason': 'лень'}, self.boot, self.now, self.mono)
+            study.request_emergency({'session_id': session['id'], 'reason': ''}, self.boot, self.now, self.mono)
+        with self.assertRaises(RuntimeError):
+            self.confirm(session, 0)
         self.emergency(session)
         with self.assertRaises(RuntimeError):
-            self.confirm(session, 59)
-        result = self.confirm(session)
+            study.confirm_emergency({'session_id': session['id'], 'confirmation': 'подтверждаю'}, self.boot, self.now, self.mono)
+        result = self.confirm(session, 0)
         self.assertEqual(result['outcome'], 'interrupted')
         self.assertIsNone(study.read()['session'])
         self.assertEqual(self.state(61)['completed_today'], 0)
@@ -198,15 +200,15 @@ class StudyTests(unittest.TestCase):
             study.confirm_emergency({'session_id': old['id'], 'confirmation': study.CONFIRMATION}, self.boot, self.now + 86460, self.mono + 86460)
         self.assertIsNotNone(study.read()['session'])
 
-    def test_prearmed_confirmation_expires_and_reboot_restarts_wait(self):
+    def test_prearmed_confirmation_expires_and_reboot_does_not_create_wait(self):
         session = self.start()
         self.emergency(session)
         with self.assertRaises(RuntimeError):
             self.confirm(session, 181)
         self.emergency(session)
         study.status('boot-2', self.now + 5, 1)
-        with self.assertRaises(RuntimeError):
-            study.confirm_emergency({'session_id': session['id'], 'confirmation': study.CONFIRMATION}, 'boot-2', self.now + 10, 6)
+        result = study.confirm_emergency({'session_id': session['id'], 'confirmation': study.CONFIRMATION}, 'boot-2', self.now + 10, 6)
+        self.assertTrue(result['stopped'])
 
     def test_attempt_counts_exclude_urls_and_survive_completion(self):
         self.start()
@@ -277,6 +279,31 @@ class StudyHelperTests(unittest.TestCase):
         self.assertNotIn('quit', source)
         self.assertIn('com.apple.Photos', source)
         self.assertEqual(study.read()['session']['app_attempts'], {'com.example.Game': 1})
+
+    def test_rest_guard_returns_to_anki_without_quitting_apps_or_changing_focus_time(self):
+        session = study.start({'task': {'title':'Lecture'}, 'apps':['us.zoom.xos'],
+                              'preset':'pomo25', 'blackout':True, 'auto_continue':True, 'blocks':4}, 'test-boot',1000,100)
+        study.status('test-boot',2500,1600)
+        study.start_break({'session_id':session['id']},'test-boot',2500,1600)
+        with patch.object(study,'clock',return_value=1601), patch.object(study.time,'time',return_value=2501), patch.object(guard,'user_script',return_value='us.zoom.xos') as script:
+            helper.guard_study_apps()
+        source=script.call_args.args[0]
+        self.assertIn('set frontmost of application process "Anki" to true',source)
+        self.assertIn('set ankiBundle to "net.ankiweb.anki"',source)
+        self.assertIn('set visible of frontProcess to false',source)
+        self.assertNotIn('quit',source)
+        self.assertNotIn('us.zoom.xos',source)
+        self.assertNotIn('com.apple.Photos',source)
+        self.assertEqual(study.read()['history'][0]['seconds'],1500)
+        self.assertEqual(study.read()['session']['remaining'],299)
+
+    def test_selected_zoom_is_allowed_during_focus_and_unselected_apps_are_hidden(self):
+        study.start({'task': {'title':'Zoom'}, 'apps':['us.zoom.xos']},'test-boot')
+        with patch.object(guard,'user_script',return_value='') as script:
+            helper.guard_study_apps()
+        self.assertIn('"us.zoom.xos"',script.call_args.args[0])
+        self.assertNotIn('to activate',script.call_args.args[0])
+        self.assertEqual(study.read()['session']['app_attempts'],{})
 
     def test_entertainment_domains_close_without_touching_documentation(self):
         study.start({'task': {'title': 'Учёба'}, 'apps': []}, 'test-boot')

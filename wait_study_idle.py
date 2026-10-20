@@ -16,7 +16,7 @@ def current_session():
     if not isinstance(state, dict) or 'session' not in state:
         raise ValueError('Некорректное состояние блока; обновление отменено.')
     session = state['session']
-    if session is not None and (not isinstance(session, dict) or session.get('phase') not in ('focus', 'break')):
+    if session is not None and (not isinstance(session, dict) or session.get('phase') not in ('focus', 'break', 'ready', 'prepare')):
         raise ValueError('Неизвестное состояние блока; обновление отменено.')
     return session
 
@@ -30,7 +30,7 @@ def wait_until_idle(read=current_session, pause=time.sleep, report=print):
             return
         phase = session['phase']
         if phase != previous:
-            report('Ожидаю окончания ' + ('учебного блока' if phase == 'focus' else 'отдыха') +
+            report('Ожидаю окончания ' + {'focus':'учебного блока', 'break':'отдыха', 'ready':'серии (подтверди возвращение в Anki)', 'prepare':'подготовки и серии'}[phase] +
                    '. Таймер и ограничения сохраняются. Ctrl+C — отменить обновление.')
             previous = phase
         pause(5)

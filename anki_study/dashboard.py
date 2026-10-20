@@ -9,7 +9,7 @@ from aqt import mw, gui_hooks
 from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDialog, QDialog, QFrame,
                     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QProgressBar,
                     QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl, QAbstractItemView,
-                    QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy, QSize, QRect, QApplication, QCheckBox)
+                    QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy, QSize, QRect, QApplication, QCheckBox, QSpinBox)
 from . import bridge, analytics, activity_detail
 
 PREFS = Path(__file__).parent / 'user_files/preferences.json'
@@ -144,6 +144,10 @@ class MenuTimer:
                 text = f'◉ ДОП. +{extra // 60:02}:{extra % 60:02}'
             if session['phase'] == 'break':
                 text = f'{"‼" if notice.event and int(time.monotonic()) % 2 else "☕"} ОТДЫХ {remaining // 60:02}:{remaining % 60:02}'
+            elif session['phase'] == 'ready':
+                text = '✓ ОТДЫХ ЗАВЕРШЁН'
+            elif session['phase'] == 'prepare':
+                text = f'→ СТАРТ ЧЕРЕЗ {remaining // 60:02}:{remaining % 60:02}'
             tip = session['task']['title']
         elif not state:
             text = 'Фокус · …'
@@ -231,7 +235,8 @@ class PhaseNotice(QDialog):
         self.demo = demo
         rest = event['kind'] == 'break'
         overtime = event['kind'] == 'overtime' and not demo
-        self.headline.setText('ПРОВЕРКА СИГНАЛА' if demo else '80 МИНУТ ВЫПОЛНЕНЫ' if overtime else 'БЛОК ЗАВЕРШЁН · ПОРА ОТДОХНУТЬ' if rest else 'ПЕРЕРЫВ ЗАВЕРШЁН')
+        minutes = ((self.dock.state or {}).get('session') or {}).get('focus_seconds', 4800) // 60
+        self.headline.setText('ПРОВЕРКА СИГНАЛА' if demo else f'{minutes} МИНУТ ВЫПОЛНЕНЫ' if overtime else 'БЛОК ЗАВЕРШЁН · ПОРА ОТДОХНУТЬ' if rest else 'ПЕРЕРЫВ ЗАВЕРШЁН')
         self.detail.setText('Это проверка. Учебный таймер не меняется.' if demo else
                             'Дополнительное время прибавляется к этому блоку.\nПолный перерыв начнётся по кнопке «Начать отдых».' if overtime else
                             'Встань, пройдись, отдохни от экрана.\nПерерыв уже идёт; подтверждение не меняет таймер.' if rest else
@@ -362,6 +367,97 @@ class TaskList(QListWidget):
             item.setSizeHint(QSize(0, max(32, text.height() + 16)))
 
 
+class RestWindow(QDialog):
+    """A black, non-destructive cover. The service owns rest and app enforcement."""
+    def __init__(self, dock, screen):
+        super().__init__(mw, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.dock = dock
+        self.setWindowTitle('Отдых · Фокус')
+        self.setStyleSheet('QDialog {background:#050608;color:#c9d4d6;} QLabel {color:#c9d4d6;background:transparent;} QPushButton {padding:14px;background:#15282c;color:#dfc18c;border:1px solid #354b4e;border-radius:10px;}')
+        self.setGeometry(screen.geometry())
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(40, 40, 40, 40)
+        layout.addStretch()
+        self.heading = QLabel('ОТДЫХ')
+        self.heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.heading)
+        self.clock = QLabel('05:00')
+        self.clock.setStyleSheet('font-size:72px;color:#9cb3b7;')
+        self.clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.clock)
+        self.hint = QLabel('Встань из-за стола. Пройдись, подыши, разомнись.\nПроведи этот перерыв без телефона и экрана.')
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
+        self.back = QPushButton('Я вернулся · выбрать следующий блок')
+        self.back.clicked.connect(dock.prepare_next)
+        layout.addWidget(self.back, alignment=Qt.AlignmentFlag.AlignCenter)
+        emergency = QPushButton('Экстренное прерывание')
+        emergency.clicked.connect(dock.request_emergency)
+        layout.addWidget(emergency, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch()
+
+    def reject(self):
+        pass
+
+    def closeEvent(self, event):
+        event.ignore()
+
+
+class RestScreen:
+    def __init__(self, dock):
+        self.dock = dock
+        self.windows = []
+        self.suspended = False
+        self.last_ready = None
+
+    def update(self):
+        session = ((self.dock.state or {}).get('session') or {})
+        active = session.get('blackout') and session.get('phase') in ('break', 'ready') and not self.suspended
+        if not active:
+            for window in self.windows:
+                window.hide()
+            return
+        screens = QApplication.screens()
+        if len(self.windows) != len(screens):
+            for window in self.windows:
+                window.hide()
+                window.deleteLater()
+            self.windows = [RestWindow(self.dock, screen) for screen in screens]
+        ready = session['phase'] == 'ready'
+        seconds = math.ceil(bridge.remaining_seconds(self.dock.state))
+        for window, screen in zip(self.windows, screens):
+            window.setGeometry(screen.geometry())
+            window.heading.setText('ПЕРЕРЫВ ЗАВЕРШЁН' if ready else 'ОТДЫХ')
+            window.clock.setText('00:00' if ready else f'{seconds // 60:02}:{seconds % 60:02}')
+            window.back.setVisible(ready)
+            if not window.isVisible():
+                window.show()
+                window.raise_()
+                window.activateWindow()
+        if QApplication.applicationState() != Qt.ApplicationState.ApplicationActive and self.windows:
+            # Independent of slow browser scans in the system guard. AppKit
+            # activates Anki itself; no Apple Events permission to another app.
+            self.windows[0].raise_()
+            self.windows[0].activateWindow()
+            native = getattr(self.dock, 'menu_timer', None)
+            if native:
+                try:
+                    application = native.send(native.objc.objc_getClass(b'NSApplication'), 'sharedApplication')
+                    native.send(application, 'activateIgnoringOtherApps:', [True], [native.c.c_bool], None)
+                except Exception:
+                    pass
+        if ready and self.last_ready != session['id']:
+            self.last_ready = session['id']
+            bridge.play_alert_sound('ready')
+
+    def dispose(self):
+        for window in self.windows:
+            window.hide()
+            window.deleteLater()
+        self.windows = []
+
+
 class StudyDock(QDockWidget):
     def __init__(self):
         super().__init__('Учебные блоки', mw)
@@ -388,11 +484,17 @@ class StudyDock(QDockWidget):
         self.detail_status = {}
         self.usage_sampling = False
         self.usage_generation = 0
+        self.next_saving = False
         try:
             self.preferences = json.loads(PREFS.read_text())
         except (OSError, ValueError):
             self.preferences = {}
         self.phase_notice = PhaseNotice(self)
+        self.rest_screen = RestScreen(self)
+        self.next_save = QTimer(self)
+        self.next_save.setSingleShot(True)
+        self.next_save.setInterval(300)
+        self.next_save.timeout.connect(self.save_next_selection)
         header = QWidget()
         header.setObjectName('focusHeader')
         header_layout = QHBoxLayout(header)
@@ -433,9 +535,36 @@ class StudyDock(QDockWidget):
         self.heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.heading.setMaximumHeight(56)
         hero.addWidget(self.heading)
-        cycle = label('80 мин фокуса  ·  10 / 30 мин отдыха')
-        cycle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hero.addWidget(cycle)
+        self.cycle = label('')
+        self.cycle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero.addWidget(self.cycle)
+        _, modes = card(layout)
+        modes.addWidget(label('Режим фокуса', 'sectionTitle'))
+        self.mode = QComboBox()
+        self.mode.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        for key in bridge.PRESETS:
+            minutes, short, long, every = bridge.PRESETS[key]
+            self.mode.addItem(f'{minutes} / {short} · {long} мин после {every} блоков', key)
+        self.mode.setCurrentIndex(max(0, self.mode.findData(self.preferences.get('focus_mode', 'pomo25'))))
+        modes.addWidget(self.mode)
+        self.auto_next = QCheckBox('Автопродолжение серии')
+        self.auto_next.setStyleSheet('color:#c4d9de;')
+        self.auto_next.setChecked(self.preferences.get('auto_next', True))
+        modes.addWidget(self.auto_next)
+        self.series_blocks = QSpinBox()
+        self.series_blocks.setRange(1, 24)
+        self.series_blocks.setValue(min(24, max(1, self.preferences.get('series_blocks', 4))))
+        self.series_blocks.setPrefix('Блоков в серии: ')
+        modes.addWidget(self.series_blocks)
+        self.blackout = QCheckBox('Чёрный экран на отдыхе · возврат в Anki')
+        self.blackout.setStyleSheet('color:#c4d9de;')
+        self.blackout.setChecked(self.preferences.get('rest_blackout', True))
+        modes.addWidget(self.blackout)
+        modes.addWidget(label('После отдыха — «Я вернулся», затем 2 минуты на задачи. Без изменений продолжатся прежние. После последнего блока серия завершится.'))
+        for control, signal in ((self.mode, self.mode.currentIndexChanged), (self.auto_next, self.auto_next.toggled),
+                                (self.series_blocks, self.series_blocks.valueChanged), (self.blackout, self.blackout.toggled)):
+            signal.connect(self.save_mode)
+        self.cycle.setText(bridge.cycle_text(self.mode.currentData()))
         day_row = QHBoxLayout()
         day_row.addWidget(label('ТВОЙ ДЕНЬ', 'eyebrow'))
         self.day_count = label('0 / 5', 'sectionTitle')
@@ -544,8 +673,9 @@ class StudyDock(QDockWidget):
         self.start.setObjectName('primary')
         self.start.clicked.connect(self.start_block)
         self.title.textChanged.connect(self.update_start_enabled)
+        self.title.textChanged.connect(self.queue_next_selection)
         footer_layout.addWidget(self.start)
-        lock_note = label('80 минут. После старта настройки фиксируются.')
+        lock_note = label('После старта настройки фиксируются. Между блоками можно выбрать задачи и приложения.')
         lock_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
         footer_layout.addWidget(lock_note)
         self.emergency = QPushButton('Экстренно прервать…')
@@ -618,31 +748,53 @@ class StudyDock(QDockWidget):
             session = value['session']
             phase = session['phase'] if session else 'idle'
             overtime = bool(session and session.get('awaiting_rest'))
-            locked = bool(session)
+            locked = bool(session) and phase != 'prepare'
             for control in (self.title, self.task_list, self.apps, self.refresh, self.pair, self.app_picker_button):
                 control.setEnabled(not locked)
+            for control in (self.mode, self.auto_next, self.series_blocks, self.blackout):
+                control.setEnabled(not session)
             self.update_start_enabled()
-            self.emergency.setEnabled(phase == 'focus' and value['emergency_available'])
-            self.emergency.setVisible(phase == 'focus' and not overtime)
-            self.phase_tag.setText('ДОПОЛНИТЕЛЬНОЕ ВРЕМЯ' if overtime else {'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА'}[phase])
-            self.start.setText('Начать отдых   →' if overtime else {'idle': 'Начать блок   →', 'focus': 'Блок идёт · настройки закрыты', 'break': 'Сначала восстановись'}[phase])
+            self.emergency.setEnabled(bool(session) and value['emergency_available'])
+            self.emergency.setVisible(bool(session))
+            self.phase_tag.setText('ДОПОЛНИТЕЛЬНОЕ ВРЕМЯ' if overtime else {'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА', 'ready': 'ПЕРЕРЫВ ЗАВЕРШЁН', 'prepare': 'ВЫБОР СЛЕДУЮЩЕГО БЛОКА'}[phase])
+            self.start.setText('Начать отдых   →' if overtime else {'idle': 'Начать серию   →', 'focus': 'Блок идёт · настройки закрыты', 'break': 'Сначала восстановись', 'ready': 'Я вернулся · выбрать задачи →', 'prepare': 'Начать сейчас →'}[phase])
+            self.cycle.setText(bridge.cycle_text((session or {}).get('preset', self.mode.currentData())))
             self.tick_display()
             count = value['completed_today']
-            self.day_progress.setValue(min(count, 6))
-            self.day_count.setText(f'{count} / 5')
+            total = (session or {}).get('blocks_total', 0)
+            self.day_progress.setRange(0, total or 5)
+            self.day_progress.setValue(total - session.get('blocks_left', total) + (phase == 'break') if total else min(count, 5))
+            self.day_count.setText(f'{count} за день' + (f' · серия {total - session.get("blocks_left", total) + 1}/{total}' if total else ''))
             attempts = sum(session.get('attempts', {}).values()) + sum(session.get('app_attempts', {}).values()) if session else 0
-            self.progress.setText(('80 минут выполнены. Дополнительное время учитывается; отдых ждёт подтверждения.' if overtime else
+            self.progress.setText(('Минимум выполнен. Дополнительное время учитывается; отдых ждёт подтверждения.' if overtime else
                                    'Перерыв перед следующим блоком.' if phase == 'break' else
-                                   f'Настройки зафиксированы · блокировок: {attempts}' if phase == 'focus' else 'Пять основных блоков. Шестой — по желанию.') +
+                                   'Нажми «Я вернулся» — начнутся 2 минуты выбора.' if phase == 'ready' else
+                                   'Через 2 минуты блок начнётся автоматически. Выбор сохраняется сразу.' if phase == 'prepare' else
+                                   f'Настройки зафиксированы · блокировок: {attempts}' if phase == 'focus' else 'Выбери режим и число блоков в серии.') +
                                   f'\nСрабатываний за день: {value.get("attempts_today", 0)}')
             if session:
                 self.heading.setText(session['task']['title'])
                 committed = session['task'].get('items', [session['task']])
                 if self.last_phase != phase:
-                    self.render_tasks(committed, locked=True)
+                    if phase == 'prepare':
+                        self.selected_ids = {t.get('occurrence_id') for t in committed if t.get('occurrence_id')}
+                        if not self.selected_ids:
+                            self.title.setText(session['task']['title'])
+                        available = {t.get('occurrence_id') for t in self.tasks}
+                        self.tasks += [t for t in committed if t.get('occurrence_id') and t['occurrence_id'] not in available]
+                        self.render_tasks(self.tasks)
+                        for i in range(self.apps.count()):
+                            item = self.apps.item(i)
+                            item.setCheckState(Qt.CheckState.Checked if item.data(Qt.ItemDataRole.UserRole) in session['apps'] else Qt.CheckState.Unchecked)
+                        self.sort_apps()
+                        self.update_app_summary()
+                    else:
+                        if self.picker.isVisible():
+                            self.picker.reject()
+                        self.render_tasks(committed, locked=True)
             else:
                 self.heading.setText('Выбери задачи для блока')
-                if self.last_phase in ('focus', 'break'):
+                if self.last_phase in ('focus', 'break', 'ready', 'prepare'):
                     self.render_tasks(self.tasks)
             if not value.get('service_running', False):
                 self.message.setText('Системная служба не запущена. Блокировка не подтверждена; новые блоки закрыты.')
@@ -659,12 +811,67 @@ class StudyDock(QDockWidget):
         self.run(lambda: bridge.helper('study-status'), updated)
 
     def tick_display(self):
+        self.rest_screen.update()
         if ((self.state or {}).get('session') or {}).get('awaiting_rest'):
             extra = int(bridge.overtime_seconds(self.state))
             self.timer_label.setText(f'+{extra // 60:02}:{extra % 60:02}')
             return
-        seconds = math.ceil(bridge.remaining_seconds(self.state))
+        seconds = math.ceil(bridge.remaining_seconds(self.state)) if (self.state or {}).get('session') else bridge.PRESETS[self.mode.currentData()][0] * 60
         self.timer_label.setText(f'{seconds // 60:02}:{seconds % 60:02}')
+
+    def can_edit(self):
+        return not (self.state or {}).get('session') or self.state['session']['phase'] == 'prepare'
+
+    def save_mode(self, *_):
+        if (self.state or {}).get('session'):
+            return
+        self.preferences.update(focus_mode=self.mode.currentData(), auto_next=self.auto_next.isChecked(),
+                                series_blocks=self.series_blocks.value(), rest_blackout=self.blackout.isChecked())
+        bridge.save_preferences(PREFS, self.preferences)
+        self.cycle.setText(bridge.cycle_text(self.mode.currentData()))
+        self.tick_display()
+        update_home_widget()
+
+    def prepare_next(self):
+        session = (self.state or {}).get('session') or {}
+        if self.busy or session.get('phase') != 'ready':
+            return
+        self.busy = True
+        def done(value):
+            self.busy = False
+            if value:
+                self.state = dict(self.state, session=value)
+                self.rest_screen.update()
+                show_study()
+            self.poll()
+        self.run(lambda: bridge.helper('study-next-ready', {'session_id': session['id']}), done)
+
+    def queue_next_selection(self, *_):
+        if ((self.state or {}).get('session') or {}).get('phase') == 'prepare':
+            self.next_save.start()
+
+    def save_next_selection(self):
+        session = (self.state or {}).get('session') or {}
+        if session.get('phase') != 'prepare':
+            return
+        if self.busy or self.next_saving:
+            self.next_save.start()
+            return
+        try:
+            task = bridge.block_task(self.selected_tasks(), self.title.text())
+            if not task['title']:
+                return
+        except ValueError:
+            return
+        apps = [self.apps.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.apps.count())
+                if self.apps.item(i).checkState() == Qt.CheckState.Checked]
+        self.next_saving = True
+        def saved(value):
+            self.next_saving = False
+            if value and ((self.state or {}).get('session') or {}).get('id') == session['id'] and self.state['session']['phase'] == 'prepare':
+                self.state = dict(self.state, session=value)
+            self.poll()
+        self.run(lambda: bridge.helper('study-next-update', {'session_id': session['id'], 'task': task, 'apps': apps}), saved)
 
     def selected_tasks(self):
         return [task for task in self.tasks if task['occurrence_id'] in self.selected_ids]
@@ -689,7 +896,7 @@ class StudyDock(QDockWidget):
         self.title.setVisible(not locked and not self.selected_ids)
 
     def selection_changed(self, *_):
-        if self.busy or (self.state or {}).get('session'):
+        if self.busy or not self.can_edit():
             return
         self.selected_ids = {self.task_list.item(i).data(Qt.ItemDataRole.UserRole)
                              for i in range(self.task_list.count())
@@ -697,6 +904,7 @@ class StudyDock(QDockWidget):
         self.title.setVisible(not self.selected_ids)
         self.update_start_enabled()
         update_home_widget()
+        self.queue_next_selection()
 
     def filter_apps(self, text):
         query = ''.join(text.casefold().split())
@@ -709,11 +917,15 @@ class StudyDock(QDockWidget):
             item.setHidden(query not in ''.join(names.casefold().split()))
 
     def update_start_enabled(self, *_):
+        phase = (((self.state or {}).get('session')) or {}).get('phase')
+        if phase == 'ready':
+            self.start.setEnabled(not self.busy)
+            return
         if ((self.state or {}).get('session') or {}).get('awaiting_rest'):
             self.start.setEnabled(not self.busy)
             return
         self.start.setEnabled(bool(self.selected_ids or self.title.text().strip()) and not self.busy and
-                              bool(self.state) and not self.state.get('session') and
+                              bool(self.state) and self.can_edit() and
                               self.state.get('service_running', False))
 
     def update_app_summary(self):
@@ -746,9 +958,10 @@ class StudyDock(QDockWidget):
             bridge.save_preferences(PREFS, self.preferences)
         self.sort_apps()
         self.update_app_summary()
+        self.queue_next_selection()
 
     def toggle_task(self, index):
-        if self.busy or (self.state or {}).get('session') or not 0 <= index < len(self.tasks):
+        if self.busy or not self.can_edit() or not 0 <= index < len(self.tasks):
             return
         item = self.task_list.item(index)
         item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
@@ -782,7 +995,7 @@ class StudyDock(QDockWidget):
 
     def apply_plan(self, value):
         # A late network response must not replace the committed task UI.
-        if self.state and self.state.get('session'):
+        if not self.can_edit():
             return
         self.tasks = value['tasks']
         self.plan_date = value['date']
@@ -794,25 +1007,46 @@ class StudyDock(QDockWidget):
         update_home_widget()
 
     def start_block(self):
+        session = ((self.state or {}).get('session') or {})
+        if session.get('phase') == 'ready':
+            self.prepare_next()
+            return
         if ((self.state or {}).get('session') or {}).get('awaiting_rest'):
             self.begin_rest()
             return
-        if self.busy or (self.state or {}).get('session') or not (self.selected_ids or self.title.text().strip()):
+        if self.busy or not self.can_edit() or not (self.selected_ids or self.title.text().strip()):
             return
         apps = [self.apps.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.apps.count())
                 if self.apps.item(i).checkState() == Qt.CheckState.Checked]
         selected = self.selected_tasks()
         if len(selected) > 1 and not (self.state or {}).get('supports_task_groups'):
-            self.message.setText('Для нескольких задач нужно обновить системную службу: запусти repair-study.command из подготовленного пакета.')
+            self.message.setText('Для нескольких задач нужно обновить системную службу: запусти install-study.command после серии.')
             return
         try:
             task = bridge.block_task(selected, self.title.text())
         except ValueError as error:
             self.message.setText(str(error))
             return
-        answer = QMessageBox.question(self, 'Начать блок?', '80 минут без изменения задачи и приложений. Затем обязательный перерыв 10 / 30 минут. Экстренный выход: причина, ожидание 60 секунд и подтверждение; один раз в день.\n\nПеред стартом сохрани документы и останови фоновую музыку, если она мешает.')
-        if answer != QMessageBox.StandardButton.Yes:
-            return
+        payload = {'task': task, 'apps': apps}
+        command = 'study-start'
+        if session.get('phase') == 'prepare':
+            command = 'study-next-start'
+            payload['session_id'] = session['id']
+        else:
+            if not (self.state or {}).get('supports_pomodoro'):
+                self.message.setText('Обнови системную службу через install-study.command: она ещё не поддерживает новые режимы, экран отдыха и автопродолжение.')
+                return
+            payload.update(preset=self.mode.currentData(), auto_continue=self.auto_next.isChecked(),
+                           blocks=self.series_blocks.value(), blackout=self.blackout.isChecked())
+            count = self.series_blocks.value() if self.auto_next.isChecked() else 1
+            answer = QMessageBox.question(self, 'Начать серию?', bridge.cycle_text(self.mode.currentData()) +
+                f'\nБлоков: {count}. После старта режим и длина серии фиксируются.\n' +
+                ('После отдыха — подтверждение возвращения и 2 минуты выбора, затем автозапуск.\n' if self.auto_next.isChecked() else '') +
+                ('Во время отдыха экран чёрный, переключение приложений возвращает в Anki.\n' if self.blackout.isChecked() else '') +
+                'Экстренное прерывание: «Да», затем ПОДТВЕРЖДАЮ. Один раз в день.\nСохрани документы перед стартом.')
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            self.save_mode()
         self.preferences['apps'] = apps
         bridge.save_preferences(PREFS, self.preferences)
         self.busy = True
@@ -827,7 +1061,7 @@ class StudyDock(QDockWidget):
                 update_home_widget()
                 self.message.setText('Условия блока зафиксированы системной службой.')
             self.poll()
-        self.run(lambda: bridge.helper('study-start', {'task': task, 'apps': apps}), started)
+        self.run(lambda: bridge.helper(command, payload), started)
 
     def begin_rest(self):
         session = (self.state or {}).get('session') or {}
@@ -852,6 +1086,43 @@ class StudyDock(QDockWidget):
         self.run(lambda: bridge.helper('study-break-start', {'session_id': session['id']}), finished)
 
     def request_emergency(self):
+        if not (self.state or {}).get('supports_simple_emergency'):
+            self.legacy_emergency()
+            return
+        if self.busy or not (self.state or {}).get('session'):
+            return
+        session = self.state['session']
+        self.rest_screen.suspended = True
+        self.rest_screen.update()
+        answer = QMessageBox.question(self, 'Экстренное прерывание', 'Остановить всю серию и снять её ограничения?\nДоступно один раз в день, минимум через 20 часов после прошлого выхода.')
+        if answer != QMessageBox.StandardButton.Yes:
+            self.rest_screen.suspended = False
+            self.rest_screen.update()
+            return
+        text, ok = QInputDialog.getText(self, 'Подтверди прерывание', 'Введи точно: ПОДТВЕРЖДАЮ')
+        if not ok or text != 'ПОДТВЕРЖДАЮ':
+            self.rest_screen.suspended = False
+            self.rest_screen.update()
+            return
+        self.busy = True
+        def stopped(value):
+            self.busy = False
+            if value:
+                self.state = dict(self.state, session=None)
+                self.message.setText('Серия прервана. Экстренный выход использован.')
+            else:
+                QMessageBox.warning(self, 'Не удалось прервать', self.message.text())
+            self.rest_screen.suspended = False
+            self.rest_screen.update()
+            self.poll()
+        def requested(value):
+            if value is None:
+                stopped(None)
+                return
+            self.run(lambda: bridge.helper('study-emergency-confirm', {'session_id': session['id'], 'confirmation': text}), stopped)
+        self.run(lambda: bridge.helper('study-emergency-request', {'session_id': session['id'], 'reason': 'Экстренное прерывание по двойному подтверждению'}), requested)
+
+    def legacy_emergency(self):
         if self.busy or not self.state or not self.state.get('session'):
             return
         session = self.state['session']
@@ -1139,6 +1410,8 @@ def unloaded():
     dock = getattr(mw, '_slovo_study_dock', None)
     if dock:
         dock.closed = True
+        dock.next_save.stop()
+        dock.rest_screen.dispose()
         dock.phase_notice.dismiss()
         dock.phase_notice.deleteLater()
         dock.poller.stop()
@@ -1254,7 +1527,7 @@ HOME_SCRIPT = r'''
   <div class="sf-track"><div class="sf-fill"></div></div>
   <div class="sf-sub">80 мин учёбы · отдых 10 / 30 мин</div>
   <button type="button">Настроить блок →</button><button class="sf-wallpaper" type="button">Обои · время суток</button>`;
-  el.querySelector('button').onclick = () => pycmd(el._snapshot?.awaitingRest?'slovo:rest':'slovo:open');
+  el.querySelector('button').onclick = () => pycmd(el._snapshot?.awaitingRest?'slovo:rest':el._snapshot?.readyNext?'slovo:next':'slovo:open');
   el.querySelector('.sf-wallpaper').onclick = () => pycmd('slovo:wallpaper');
   host.appendChild(el);
   const timer = setInterval(() => {
@@ -1269,11 +1542,11 @@ HOME_SCRIPT = r'''
  window.slovoHomeState=s;window.slovoUpdateDaylight?.();
  el._snapshot = {...s,at:performance.now()};
  el.querySelector('.sf-phase').textContent = s.phase;
- el.querySelector('.sf-count').textContent = s.count+' / 5';
+ el.querySelector('.sf-count').textContent = s.seriesTotal?'Серия '+s.seriesIndex+'/'+s.seriesTotal:s.count+' за день';
  el.querySelector('.sf-task').textContent = s.title;
- el.querySelector('.sf-fill').style.width = Math.min(s.count/5*100,100)+'%';
+ el.querySelector('.sf-fill').style.width = Math.min((s.seriesTotal?(s.seriesIndex-1)/s.seriesTotal:s.count/5)*100,100)+'%';
  el.querySelector('.sf-sub').textContent = s.subtitle;
- el.querySelector('button').textContent = s.awaitingRest?'Начать отдых →':s.active ? 'Открыть управление →' : 'Настроить блок →';
+ el.querySelector('button').textContent = s.awaitingRest?'Начать отдых →':s.readyNext?'Я вернулся →':s.active ? 'Открыть управление →' : 'Настроить блок →';
  const grid = document.querySelector('.unified-grid');
  if (grid) {
   let tasks = document.getElementById('slovo-home-tasks');
@@ -1308,7 +1581,7 @@ HOME_SCRIPT = r'''
   tasks.style.gridArea = stats && Number(stats.style.gridColumnStart) > 1
    ? `${stats.style.gridRowStart} / 1 / span ${stats.style.gridRowEnd.replace('span ', '') || 2} / span ${Number(stats.style.gridColumnStart)-1}`
    : '5 / 1 / span 2 / span 2';
-  const key = JSON.stringify([s.tasks,s.active,s.connected,s.planBusy,s.selected]);
+  const key = JSON.stringify([s.tasks,s.active,s.editable,s.connected,s.planBusy,s.selected]);
   if (tasks._key !== key) {
    tasks._key = key;
    const list = tasks.querySelector('.st-list'), position=list.scrollTop;
@@ -1325,7 +1598,7 @@ HOME_SCRIPT = r'''
      button.append(num,title);
      button.onclick=()=>pycmd('slovo:task:'+button.dataset.index);
     }
-    existing.delete(id);button.dataset.index=i;button.disabled=s.active;button.title=task.title;
+    existing.delete(id);button.dataset.index=i;button.disabled=!s.editable;button.title=task.title;
     button.setAttribute('aria-checked',String(task.selected));
     button.querySelector('.st-num').textContent=task.selected?'✓':'';
     button.querySelector('.st-title').textContent=task.title;
@@ -1340,7 +1613,7 @@ HOME_SCRIPT = r'''
     list.appendChild(empty);
    }
    tasks.querySelector('.st-refresh').disabled=s.active||s.planBusy;
-   tasks.querySelector('.st-note').textContent=s.active?'Блок идёт · задачи зафиксированы':s.tasks.length?(s.selected?'Выбрано: '+s.selected+' · настрой блок →':'Отметь одну или несколько задач'):'План обновляется автоматически';
+   tasks.querySelector('.st-note').textContent=!s.editable?'Блок идёт · задачи зафиксированы':s.tasks.length?(s.selected?'Выбрано: '+s.selected+' · настрой блок →':'Отметь одну или несколько задач'):'План обновляется автоматически';
   }
  }
  // Hide only the explicitly archived root. Newly created decks stay visible.
@@ -1368,16 +1641,21 @@ def update_home_widget(*_):
     phase = (session or {}).get('phase', 'idle')
     committed = (session or {}).get('task', {})
     committed_items = committed.get('items', [committed] if committed else [])
-    chosen = {item.get('occurrence_id') for item in committed_items} if session else (dock.selected_ids if dock else set())
+    editable = not session or phase == 'prepare'
+    chosen = {item.get('occurrence_id') for item in committed_items} if session and not editable else (dock.selected_ids if dock else set())
     tasks = dock.tasks if dock and dock.tasks else committed_items
     payload = {
-        'phase': 'ДОПОЛНИТЕЛЬНОЕ ВРЕМЯ' if (session or {}).get('awaiting_rest') else {'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА'}[phase],
-        'remaining': bridge.remaining_seconds(state), 'active': bool(session),
+        'phase': 'ДОПОЛНИТЕЛЬНОЕ ВРЕМЯ' if (session or {}).get('awaiting_rest') else {'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА', 'ready': 'ПЕРЕРЫВ ЗАВЕРШЁН', 'prepare': 'ВЫБОР ЗАДАЧ · АВТОСТАРТ'}[phase],
+        'remaining': bridge.remaining_seconds(state) if session else bridge.PRESETS[dock.mode.currentData() if dock else 'pomo25'][0] * 60, 'active': bool(session),
         'awaitingRest': bool((session or {}).get('awaiting_rest')), 'overtime': bridge.overtime_seconds(state),
+        'readyNext': phase == 'ready', 'editable': editable,
         'count': (state or {}).get('completed_today', 0),
+        'seriesTotal': (session or {}).get('blocks_total', 0),
+        'seriesIndex': (session or {}).get('blocks_total', 0) - (session or {}).get('blocks_left', 0) + 1,
         'title': committed.get('title', f'Выбрано задач: {len(chosen)}' if chosen else 'Выбери задачи для блока'),
         'subtitle': ('Отдых начнётся после подтверждения' if (session or {}).get('awaiting_rest') else
-                     '80 мин учёбы · отдых 10 / 30 мин' if state else 'Проверяем системный таймер…'),
+                     'Две минуты на выбор. Затем автоматический старт.' if phase == 'prepare' else
+                     bridge.cycle_text((session or {}).get('preset', dock.mode.currentData() if dock else 'pomo25')) if state else 'Проверяем системный таймер…'),
         'archive': str((mw.col.get_config('slovo_archive') or {}).get('deck_id', '')),
         'tasks': [{'id': task.get('occurrence_id'), 'title': bridge.task_display_title(task),
                    'selected': task.get('occurrence_id') in chosen} for task in tasks],
@@ -1407,6 +1685,9 @@ def home_message(handled, message, context):
     if message == 'slovo:rest':
         ensure_study().begin_rest()
         return True, None
+    if message == 'slovo:next':
+        ensure_study().prepare_next()
+        return True, None
     if message == 'slovo:details-settings':
         configure_activity_details()
         return True, None
@@ -1429,7 +1710,7 @@ def home_message(handled, message, context):
     if message.startswith('slovo:task:'):
         dock = ensure_study()
         index = message.removeprefix('slovo:task:')
-        if index.isdecimal() and 0 <= int(index) < len(dock.tasks) and not (dock.state or {}).get('session'):
+        if index.isdecimal() and 0 <= int(index) < len(dock.tasks) and dock.can_edit():
             dock.toggle_task(int(index))
         return True, None
     if message == 'slovo:archive':

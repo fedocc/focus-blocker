@@ -18,8 +18,13 @@ from focus_youtube_guard import atomic_json
 BASE = Path('/Library/PrivilegedHelperTools/focus-open')
 STATE = BASE / 'study.json'
 FOCUS = 80 * 60
-EMERGENCY_WAIT = 60
-CONFIRMATION = 'ПРЕРВАТЬ БЛОК'
+EMERGENCY_WAIT = 0
+CONFIRMATION = 'ПОДТВЕРЖДАЮ'
+PREPARE = 120
+PRESETS = {'deep80': (4800, 600, 1800, 2),
+           'pomo20': (1200, 300, 1800, 4),
+           'pomo25': (1500, 300, 1800, 4),
+           'pomo30': (1800, 300, 1800, 4)}
 ESSENTIAL_APPS = frozenset({
     'net.ankiweb.anki', 'com.apple.Photos', 'com.apple.finder',
     'com.apple.systemuiserver', 'com.apple.dock', 'com.apple.controlcenter',
@@ -75,6 +80,20 @@ def emergency_available(value, now):
     return last is None or (day_at(now) > day_at(last) and now - last >= 20 * 3600)
 
 
+def duration(session):
+    return session.get('focus_seconds', FOCUS)
+
+
+def new_focus(previous, now, mono, boot):
+    result = copy.deepcopy(previous)
+    for key in ('awaiting_rest', 'overtime_seconds', 'overtime_anchor_mono', 'app_guard_error'):
+        result.pop(key, None)
+    result.update(id=secrets.token_hex(16), phase='focus', started_at=now, boot=boot,
+                  remaining=duration(result), deadline_mono=mono + duration(result),
+                  ends_at=now + duration(result), emergency=None, attempts={}, app_attempts={})
+    return result
+
+
 def advance(value, now, mono, boot):
     session = value['session']
     if not session:
@@ -91,6 +110,9 @@ def advance(value, now, mono, boot):
     session['ends_at'] = now + session['remaining']
     if session.get('emergency') and mono > session['emergency']['ready_mono'] + 120:
         session['emergency'] = None
+    if session['phase'] == 'ready':
+        session.update(remaining=0, deadline_mono=mono, ends_at=now)
+        return True
     if session.get('awaiting_rest'):
         session['overtime_seconds'] += max(0, mono - session['overtime_anchor_mono'])
         session['overtime_anchor_mono'] = mono
@@ -103,6 +125,13 @@ def advance(value, now, mono, boot):
         session.update(awaiting_rest=True,
                        overtime_seconds=max(0, mono - session['deadline_mono']),
                        overtime_anchor_mono=mono, emergency=None)
+    elif session['phase'] == 'prepare':
+        # One fresh block only; a stopped daemon never earns unattended blocks.
+        value['session'] = new_focus(session, now, mono, boot)
+    elif session.get('auto_continue') and session.get('blocks_left', 1) > 1:
+        session.update(phase='ready', remaining=0, deadline_mono=mono, ends_at=now,
+                       emergency=None, blocks_left=session['blocks_left'] - 1,
+                       cycle_index=session.get('cycle_index', 1) + 1)
     else:
         value['session'] = None
     return True
@@ -124,14 +153,16 @@ def start_break(request, boot, now=None, mono=None):
         return copy.deepcopy(session)  # Retrying never resets the rest deadline.
     if not session.get('awaiting_rest'):
         save(value)
-        raise RuntimeError('Сначала заверши 80 минут учебного блока.')
+        raise RuntimeError('Сначала заверши учебный блок.')
     extra = session['overtime_seconds']
     ended = {k: copy.deepcopy(session[k]) for k in
              ('id', 'task', 'apps', 'started_at', 'attempts', 'app_attempts')}
-    ended.update(ended_at=now, outcome='completed', seconds=FOCUS + extra,
-                 overtime_seconds=extra)
+    ended.update(ended_at=now, outcome='completed', seconds=duration(session) + extra,
+                 overtime_seconds=extra, focus_seconds=duration(session), preset=session.get('preset', 'deep80'))
     value['history'] = (value['history'] + [ended])[-1000:]
-    rest = 30 * 60 if completed_today(value, now) % 2 == 0 else 10 * 60
+    _, short, long, every = PRESETS[session.get('preset', 'deep80')]
+    index = session.get('cycle_index', completed_today(value, now))
+    rest = long if index % every == 0 else short
     session.update(phase='break', remaining=rest, deadline_mono=mono + rest,
                    ends_at=now + rest, emergency=None, awaiting_rest=False)
     save(value)
@@ -178,8 +209,16 @@ def clean_task(task, grouped=True):
 def start(request, boot, now=None, mono=None):
     now = time.time() if now is None else now
     mono = clock() if mono is None else mono
-    if not isinstance(request, dict) or set(request) != {'task', 'apps'}:
-        raise ValueError('Нужны только задача и приложения')
+    if not isinstance(request, dict) or not {'task', 'apps'} <= set(request) or set(request) - {'task', 'apps', 'preset', 'auto_continue', 'blocks', 'blackout'}:
+        raise ValueError('Некорректные настройки блока')
+    preset = request.get('preset', 'deep80')
+    if not isinstance(preset, str) or preset not in PRESETS:
+        raise ValueError('Неизвестный режим фокуса')
+    auto = request.get('auto_continue', False)
+    blocks = request.get('blocks', 1)
+    blackout = request.get('blackout', False)
+    if type(auto) is not bool or type(blackout) is not bool or type(blocks) is not int or not 1 <= blocks <= 24:
+        raise ValueError('Выбери от 1 до 24 блоков в серии')
     clean = clean_task(request['task'])
     apps = request['apps']
     if (not isinstance(apps, list) or len(apps) > 100 or
@@ -190,23 +229,65 @@ def start(request, boot, now=None, mono=None):
     if value['session']:
         save(value)
         raise RuntimeError('Текущий блок или обязательный перерыв ещё идёт. Изменения закрыты.')
+    seconds = PRESETS[preset][0]
     value['session'] = {
         'id': secrets.token_hex(16), 'phase': 'focus', 'task': clean,
         'apps': sorted(set(apps) | ESSENTIAL_APPS), 'started_at': now,
-        'boot': boot, 'deadline_mono': mono + FOCUS, 'remaining': FOCUS,
-        'ends_at': now + FOCUS, 'emergency': None,
+        'boot': boot, 'deadline_mono': mono + seconds, 'remaining': seconds,
+        'ends_at': now + seconds, 'emergency': None,
+        'preset': preset, 'focus_seconds': seconds, 'auto_continue': auto,
+        'blocks_left': blocks if auto else 1, 'blocks_total': blocks if auto else 1,
+        'blackout': blackout, 'series_id': secrets.token_hex(16),
         'attempts': {}, 'app_attempts': {},
     }
+    # Legacy 80-minute single blocks retain the daily alternating rest cycle.
+    if auto:
+        value['session']['cycle_index'] = 1
+    elif preset != 'deep80' or 'preset' in request:
+        value['session']['cycle_index'] = 1 + sum(
+            item['outcome'] == 'completed' and item.get('preset', 'deep80') == preset and
+            day_at(item['ended_at']) == day_at(now) for item in value['history'])
+    save(value)
+    return copy.deepcopy(value['session'])
+
+
+def next_block(request, boot, now=None, mono=None, action='ready'):
+    now = time.time() if now is None else now
+    mono = clock() if mono is None else mono
+    keys = {'session_id'} | ({'task', 'apps'} if action in ('update', 'start') else set())
+    if not isinstance(request, dict) or set(request) != keys:
+        raise ValueError('Некорректные настройки следующего блока')
+    value = read()
+    advance(value, now, mono, boot)
+    session = value['session']
+    if not session or session['id'] != request['session_id']:
+        save(value)
+        raise RuntimeError('Блок уже изменился. Обнови состояние.')
+    if action == 'ready':
+        if session['phase'] == 'ready':
+            session.update(phase='prepare', remaining=PREPARE, deadline_mono=mono + PREPARE, ends_at=now + PREPARE)
+        elif session['phase'] != 'prepare':
+            save(value)
+            raise RuntimeError('Сначала дождись окончания отдыха.')
+    else:
+        if session['phase'] != 'prepare':
+            save(value)
+            raise RuntimeError('Менять задачи можно только в двухминутном окне подготовки.')
+        task = clean_task(request['task'])
+        apps = request['apps']
+        if not isinstance(apps, list) or len(apps) > 100 or any(not isinstance(app, str) or not BUNDLE_ID.fullmatch(app) for app in apps):
+            raise ValueError('Выбери приложения из списка')
+        session.update(task=task, apps=sorted(set(apps) | ESSENTIAL_APPS))
+        if action == 'start':
+            value['session'] = new_focus(session, now, mono, boot)
     save(value)
     return copy.deepcopy(value['session'])
 
 
 def require_focus(value, session_id):
     session = value['session']
-    if not session or session['phase'] != 'focus' or session['id'] != session_id:
+    if not session or session['id'] != session_id:
         raise RuntimeError('Блок уже изменился. Обнови состояние.')
-    if session.get('awaiting_rest'):
-        raise RuntimeError('80 минут выполнены. Нажми «Начать отдых» — экстренный выход не нужен.')
     return session
 
 
@@ -215,7 +296,7 @@ def request_emergency(request, boot, now=None, mono=None):
     mono = clock() if mono is None else mono
     if not isinstance(request, dict) or set(request) != {'session_id', 'reason'}:
         raise ValueError('Нужны блок и причина')
-    reason = valid_text(request['reason'], 500, 15)
+    reason = valid_text(request['reason'], 500)
     value = read()
     advance(value, now, mono, boot)
     session = require_focus(value, request['session_id'])
@@ -239,14 +320,16 @@ def confirm_emergency(request, boot, now=None, mono=None):
     pending = session['emergency']
     if (request['confirmation'] != CONFIRMATION or not pending or
             pending['boot'] != boot or mono < pending['ready_mono']):
-        raise RuntimeError('Подожди 60 секунд и введи: ' + CONFIRMATION)
+        raise RuntimeError('Подтверди прерывание словом: ' + CONFIRMATION)
     if not emergency_available(value, now):
         raise RuntimeError('Сегодня экстренный выход уже использован.')
     value['last_emergency'] = now
-    value['history'].append({k: copy.deepcopy(session[k]) for k in
-                             ('id', 'task', 'apps', 'started_at', 'attempts', 'app_attempts')})
-    value['history'][-1].update(ended_at=now, outcome='interrupted',
-                              reason=pending['reason'], seconds=FOCUS - session['remaining'])
+    if session['phase'] == 'focus':
+        value['history'].append({k: copy.deepcopy(session[k]) for k in
+                                 ('id', 'task', 'apps', 'started_at', 'attempts', 'app_attempts')})
+        value['history'][-1].update(ended_at=now, outcome='interrupted',
+                                  reason=pending['reason'], focus_seconds=duration(session),
+                                  seconds=duration(session) - session['remaining'] + session.get('overtime_seconds', 0))
     value['history'] = value['history'][-1000:]
     value['session'] = None
     save(value)
@@ -268,6 +351,6 @@ def record_attempt(kind, identity):
 def app_health(error):
     value = read()
     session = value['session']
-    if session and session['phase'] == 'focus' and session.get('app_guard_error') != error:
+    if session and session.get('app_guard_error') != error:
         session['app_guard_error'] = error
         save(value)

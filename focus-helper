@@ -58,27 +58,38 @@ def study_status():
 
 def require_no_focus():
     current = study_status()['session']
-    if current and current['phase'] == 'focus':
+    if current and (current['phase'] in ('focus', 'prepare') or current.get('auto_continue') or current.get('blackout')):
         raise RuntimeError('Идёт учебный блок. Развлекательный доступ закрыт до его окончания.')
 
 
 def guard_study_apps():
     current = study_status()['session']
-    if not current or current['phase'] != 'focus':
+    if not current:
+        return
+    resting = current['phase'] in ('break', 'ready') and current.get('blackout', False)
+    if current['phase'] not in ('focus', 'prepare') and not resting:
         return
     # IDs are validated by the protected module. Hide rather than terminate:
     # no unsaved documents or background processes are killed.
-    allowed = '{' + ', '.join(json.dumps(app) for app in current['apps']) + '}'
+    rest_apps = study_lock.ESSENTIAL_APPS - {'com.apple.Photos', 'com.apple.finder', 'com.apple.Spotlight'}
+    allowed = '{' + ', '.join(json.dumps(app) for app in (rest_apps if resting else current['apps'])) + '}'
     script = '''tell application "System Events"
         set frontProcess to first application process whose frontmost is true
         set frontID to bundle identifier of frontProcess
         if frontID is missing value then return ""
         if frontID is not in ALLOWED then
             set visible of frontProcess to false
+            REST_ACTIVATE
             return frontID
         end if
     end tell
-    return ""'''.replace('ALLOWED', allowed)
+    return ""'''.replace('ALLOWED', allowed).replace('REST_ACTIVATE', '''
+            if exists application process "Anki" then
+                set frontmost of application process "Anki" to true
+            else
+                set ankiBundle to "net.ankiweb.anki"
+                tell application id ankiBundle to activate
+            end if''' if resting else '')
     blocked = youtube.user_script(script).strip()
     study_lock.app_health(None)
     if blocked:
@@ -391,7 +402,7 @@ def remember_report(report, current):
 def guard_cycle():
     current = read_lease()
     focus = study_lock.read()['session']
-    focusing = bool(focus and focus['phase'] == 'focus')
+    focusing = bool(focus and focus['phase'] in ('focus', 'prepare'))
     set_study_web(focusing)
     study = youtube.study_scope(youtube.read_policy())
     scope = dict(current['youtube_scope'], study_ids=study['allowed_ids'], playlist_ids=study['playlist_ids'], channel_ids=study.get('channel_ids', []), channel_paths=study.get('channel_paths', []), channel_video_ids=study.get('channel_video_ids', [])) if current and current['service'] == 'youtube' else study
@@ -497,7 +508,7 @@ def startup():
     revoke_lease()
     for service in SOCIAL_SERVICES:
         set_access(service, False)
-    set_study_web(bool(study_lock.read()['session'] and study_lock.read()['session']['phase'] == 'focus'))
+    set_study_web(bool(study_lock.read()['session'] and study_lock.read()['session']['phase'] in ('focus', 'prepare')))
     youtube.publish_health(False, 'Проверка после запуска')
 
 
@@ -538,16 +549,18 @@ def main():
         duration = int(sys.stdin.read(16))
     if args == ['stop']:
         request = json.loads(sys.stdin.read(4096))
-    if args in (['study-start'], ['study-break-start'], ['study-emergency-request'], ['study-emergency-confirm']):
+    if args in (['study-start'], ['study-break-start'], ['study-next-ready'], ['study-next-update'], ['study-next-start'], ['study-emergency-request'], ['study-emergency-confirm']):
         request = json.loads(sys.stdin.read(32768))
     with locked():
         if args == ['study-status']:
             print(json.dumps(dict(study_status(), service_running=timer_running(), supports_task_groups=True,
-                                  supports_confirmed_break=True), ensure_ascii=False))
+                                  supports_confirmed_break=True, supports_pomodoro=True, supports_simple_emergency=True), ensure_ascii=False))
         elif args == ['study-start']:
             print(json.dumps(start_study(request), ensure_ascii=False))
         elif args == ['study-break-start']:
             print(json.dumps(study_lock.start_break(request, boot_identity()), ensure_ascii=False))
+        elif args in (['study-next-ready'], ['study-next-update'], ['study-next-start']):
+            print(json.dumps(study_lock.next_block(request, boot_identity(), action=args[0].removeprefix('study-next-')), ensure_ascii=False))
         elif args == ['study-emergency-request']:
             print(json.dumps(study_lock.request_emergency(request, boot_identity()), ensure_ascii=False))
         elif args == ['study-emergency-confirm']:

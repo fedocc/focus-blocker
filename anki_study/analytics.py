@@ -43,7 +43,8 @@ def snapshot(state, usage=None, now=None, remaining=None, overtime=None):
     session = (state or {}).get('session')
     if session and session.get('phase') == 'focus' and session.get('id') not in seen:
         extra = max(0, overtime if overtime is not None else session.get('overtime_seconds', 0)) if session.get('awaiting_rest') else 0
-        seconds = max(0, min(4800, 4800 - (remaining if remaining is not None else session.get('remaining', 4800)))) + extra
+        duration = session.get('focus_seconds', 4800)
+        seconds = max(0, min(duration, duration - (remaining if remaining is not None else session.get('remaining', duration)))) + extra
         records.append(dict(session, seconds=seconds, overtime_seconds=extra, ended_at=now, outcome='live'))
     for item in records:
         if item['outcome'] == 'repair':
@@ -104,7 +105,7 @@ class UsageTracker:
             if not key or key in self.blocks:
                 continue
             task = record.get('task', {})
-            clean = {k: record[k] for k in ('id', 'seconds', 'overtime_seconds', 'ended_at', 'outcome', 'attempts', 'app_attempts', 'reason') if k in record}
+            clean = {k: record[k] for k in ('id', 'seconds', 'focus_seconds', 'preset', 'overtime_seconds', 'ended_at', 'outcome', 'attempts', 'app_attempts', 'reason') if k in record}
             clean['task'] = {'title': task.get('title', 'Учебный блок')}
             if task.get('items'):
                 clean['task']['items'] = [{'title': item.get('title', '')} for item in task['items']]

@@ -13,7 +13,14 @@ from xml.parsers.expat import ExpatError
 
 ORIGIN = 'https://slovo.45-80-228-215.sslip.io'
 HELPER = '/Library/PrivilegedHelperTools/focus-open/focus-helper'
-COMMANDS = {'study-status', 'study-start', 'study-break-start', 'study-emergency-request', 'study-emergency-confirm'}
+COMMANDS = {'study-status', 'study-start', 'study-break-start', 'study-next-ready', 'study-next-update', 'study-next-start', 'study-emergency-request', 'study-emergency-confirm'}
+PRESETS = {'deep80': (80, 10, 30, 2), 'pomo20': (20, 5, 30, 4),
+           'pomo25': (25, 5, 30, 4), 'pomo30': (30, 5, 30, 4)}
+
+
+def cycle_text(preset):
+    focus, short, long, every = PRESETS.get(preset, PRESETS['deep80'])
+    return f'{focus} мин учёбы · {short} мин отдыха · {long} мин после {every} блоков'
 
 
 class PhaseAlerts:
@@ -28,6 +35,11 @@ class PhaseAlerts:
     def observe(self, state, now=None):
         now = time.time() if now is None else now
         session = state.get('session')
+        if session and session['phase'] in ('ready', 'prepare'):
+            self.previous = dict(session)
+            self.pending = None
+            self.initial = False
+            return None
         previous = self.previous
         candidate = None
         if session and session.get('awaiting_rest'):
