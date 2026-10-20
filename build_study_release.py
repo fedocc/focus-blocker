@@ -12,7 +12,10 @@ def build():
     destination = ROOT / 'dist'
     destination.mkdir(exist_ok=True)
     addon_files = ('__init__.py', 'dashboard.py', 'bridge.py', 'analytics.py', 'focus-stats.js', 'focus-stats.css', 'manifest.json') + tuple(
-        f'wallpaper-{scene}.png' for scene in ('dawn', 'day', 'evening', 'night'))
+        f'wallpaper-{scene}.png' for scene in ('dawn', 'day', 'evening', 'night')) + tuple(
+        f'wallpaper-{theme}-{scene}.png'
+        for theme in ('skyline', 'sea', 'architecture', 'amg', 'rolls', 'goggins')
+        for scene in ('predawn', 'dawn', 'morning', 'day', 'golden', 'evening', 'night'))
     addon = destination / 'slovo-study-blocks.ankiaddon'
     with zipfile.ZipFile(addon, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
         for name in addon_files:

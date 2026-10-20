@@ -132,9 +132,40 @@ def task_display_title(task):
     return head if separator and head and tail.casefold() in weekdays else title
 
 
+WALLPAPER_THEMES = {
+    'skyline': 'Небоскрёбы', 'sea': 'Море', 'architecture': 'Архитектура в горах',
+    'amg': 'Mercedes-AMG GT', 'rolls': 'Rolls-Royce', 'goggins': 'Дэвид Гоггинс',
+    'landscape': 'Прежний пейзаж',
+}
+WALLPAPER_PERIODS = {
+    'predawn': 'Предрассвет · 05–07', 'dawn': 'Рассвет · 07–10',
+    'morning': 'Утро · 10–13', 'day': 'Полдень · 13–16',
+    'golden': 'Золотой час · 16–18', 'evening': 'Закат · 18–21',
+    'night': 'Ночь · 21–05',
+}
+
+
 def wallpaper_scene(hour=None):
     hour = dt.datetime.now().astimezone().hour if hour is None else hour
-    return 'dawn' if 6 <= hour < 10 else 'day' if 10 <= hour < 17 else 'evening' if 17 <= hour < 21 else 'night'
+    for start, end, scene in ((5, 7, 'predawn'), (7, 10, 'dawn'), (10, 13, 'morning'),
+                              (13, 16, 'day'), (16, 18, 'golden'), (18, 21, 'evening')):
+        if start <= hour < end:
+            return scene
+    return 'night'
+
+
+def wallpaper_settings(preferences, hour=None):
+    theme = preferences.get('wallpaper_theme', 'skyline')
+    if theme not in WALLPAPER_THEMES:
+        theme = 'skyline'
+    period = preferences.get('wallpaper_period', 'auto')
+    scene = period if period in WALLPAPER_PERIODS else wallpaper_scene(hour)
+    if theme == 'landscape':
+        legacy = {'predawn': 'night', 'morning': 'day', 'golden': 'evening'}.get(scene, scene)
+        path = f'wallpaper-{legacy}.png'
+    else:
+        path = f'wallpaper-{theme}-{scene}.png'
+    return {'theme': theme, 'scene': scene, 'path': path}
 
 
 def applications(roots=None):

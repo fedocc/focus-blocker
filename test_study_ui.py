@@ -10,6 +10,36 @@ import unittest
 
 class StudyUiTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'Node is unavailable')
+    def test_wallpaper_loading_cannot_commit_a_stale_selection(self):
+        source = (Path(__file__).parent / 'anki_study/dashboard.py').read_text()
+        function = source[source.index("  let pending='', generation=0"):source.index('  window.slovoUpdateDaylight=')]
+        program = r'''
+const assert=require('node:assert/strict');
+const values=new Map(), loads=[], timers=new Map();let clock=0;
+const root={dataset:{},style:{setProperty:(k,v)=>values.set(k,v),removeProperty:k=>values.delete(k)}};
+global.document={documentElement:root,querySelector:()=>({})};global.window={};
+global.Image=class{constructor(){loads.push(this)}};
+global.matchMedia=()=>({matches:false});global.requestAnimationFrame=f=>f();
+global.getComputedStyle=()=>({transform:'matrix(1,0,0,1,-500,-300)',filter:'blur(0px)',opacity:'0.4'});
+global.setTimeout=f=>{timers.set(++clock,f);return clock};global.clearTimeout=id=>timers.delete(id);
+''' + function + r'''
+const choose=path=>{window.slovoHomeState={wallpaper:{path,scene:path}};updateDaylight()};
+const flush=()=>{const jobs=[...timers.values()];timers.clear();jobs.forEach(f=>f())};
+choose('skyline');loads.at(-1).onload();assert.equal(root.dataset.slovoWallpaper,'skyline');
+choose('sea');const sea=loads.at(-1);choose('amg');const amg=loads.at(-1);
+sea.onload();flush();assert.equal(root.dataset.slovoWallpaper,'skyline');
+amg.onload();assert.equal(values.get('--slovo-wallpaper-fade'),'0.4');flush();
+assert.equal(root.dataset.slovoWallpaper,'amg');
+choose('night');const night=loads.at(-1);choose('amg');night.onload();flush();
+assert.equal(root.dataset.slovoWallpaper,'amg','returning to current wallpaper cancels pending load');
+choose('missing');loads.at(-1).onerror();choose('missing');loads.at(-1).onload();flush();
+assert.equal(root.dataset.slovoWallpaper,'missing','failed load may retry');
+console.log('wallpaper loading: passed');
+'''
+        result = subprocess.run(['node', '-e', program], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node is unavailable')
     def test_calendar_rules_include_nested_css_style_rules(self):
         script = (Path(__file__).parent / 'anki_study/focus-stats.js').read_text()
         function = script[script.index(' function calendarRules('):script.index(' calendarStyle.textContent=')]
@@ -83,6 +113,21 @@ with tempfile.TemporaryDirectory() as folder:
     QTimer.singleShot(0, lambda: (dock.apps.item(0).setCheckState(Qt.CheckState.Unchecked),dock.picker.reject()))
     dock.pick_apps()
     assert dock.apps.item(0).checkState() == Qt.CheckState.Checked
+    # Wallpaper settings preserve unrelated private preferences and Cancel is inert.
+    def change_wallpaper():
+        dialog=app.activeModalWidget()
+        theme,period=dialog.findChildren(ui.QComboBox)
+        theme.setCurrentIndex(theme.findData('sea'))
+        period.setCurrentIndex(period.findData('night'))
+        dialog.accept()
+    QTimer.singleShot(0, change_wallpaper)
+    ui.choose_wallpaper()
+    assert dock.preferences['wallpaper_theme']=='sea'
+    assert dock.preferences['wallpaper_period']=='night'
+    saved=ui.PREFS.read_bytes()
+    QTimer.singleShot(0, lambda: app.activeModalWidget().reject())
+    ui.choose_wallpaper()
+    assert ui.PREFS.read_bytes()==saved
     # Wrapping and boundary wheel handling do not depend on the outer dock.
     dock.state['session']=None
     long_tasks=[{'title':('Полное длинное название задачи без обрезки '*4)+str(i),'occurrence_id':str(i)} for i in range(12)]

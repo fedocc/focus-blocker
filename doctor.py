@@ -22,7 +22,10 @@ def main():
         except (OSError, SyntaxError) as error:
             errors.append(str(error))
     for name in ('anki_study/focus-stats.js', 'anki_study/focus-stats.css') + tuple(
-            'anki_study/wallpaper-' + scene + '.png' for scene in ('dawn', 'day', 'evening', 'night')):
+            'anki_study/wallpaper-' + scene + '.png' for scene in ('dawn', 'day', 'evening', 'night')) + tuple(
+            f'anki_study/wallpaper-{theme}-{scene}.png'
+            for theme in ('skyline', 'sea', 'architecture', 'amg', 'rolls', 'goggins')
+            for scene in ('predawn', 'dawn', 'morning', 'day', 'golden', 'evening', 'night')):
         if not (root / name).is_file():
             errors.append('Отсутствует ' + name)
     try:

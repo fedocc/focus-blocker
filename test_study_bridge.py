@@ -11,13 +11,25 @@ from anki_study import bridge
 
 class BridgeTests(unittest.TestCase):
     def test_local_wallpaper_period_boundaries_and_task_labels(self):
-        expected = {0:'night',5:'night',6:'dawn',7:'dawn',9:'dawn',10:'day',
-                    16:'day',17:'evening',20:'evening',21:'night',23:'night'}
+        expected = {0:'night',4:'night',5:'predawn',6:'predawn',7:'dawn',9:'dawn',
+                    10:'morning',12:'morning',13:'day',15:'day',16:'golden',17:'golden',
+                    18:'evening',20:'evening',21:'night',23:'night'}
         for hour, scene in expected.items():
             self.assertEqual(bridge.wallpaper_scene(hour), scene)
         self.assertEqual(bridge.task_display_title({'title':'Лекция · Вторник'}), 'Лекция')
         for title in ['Вторник', 'Разобрать · тему', 'Лекция · 18:00']:
             self.assertEqual(bridge.task_display_title({'title':title}), title)
+
+    def test_wallpaper_selection_validates_paths_and_supports_fixed_preview(self):
+        self.assertEqual(bridge.wallpaper_settings({}, 7),
+                         {'theme':'skyline', 'scene':'dawn', 'path':'wallpaper-skyline-dawn.png'})
+        self.assertEqual(bridge.wallpaper_settings({'wallpaper_theme':'sea', 'wallpaper_period':'night'}, 13),
+                         {'theme':'sea', 'scene':'night', 'path':'wallpaper-sea-night.png'})
+        invalid = {'wallpaper_theme':'../../user_files/preferences.json', 'wallpaper_period':'../night'}
+        self.assertEqual(bridge.wallpaper_settings(invalid, 13)['path'], 'wallpaper-skyline-day.png')
+        for hour in range(24):
+            path = bridge.wallpaper_settings({'wallpaper_theme':'landscape'}, hour)['path']
+            self.assertIn(path, ['wallpaper-night.png', 'wallpaper-dawn.png', 'wallpaper-day.png', 'wallpaper-evening.png'])
 
     def test_remaining_uses_protected_deadline_despite_stale_response(self):
         state = {'session': {'remaining':4800, 'deadline_mono':14800}}

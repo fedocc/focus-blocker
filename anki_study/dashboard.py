@@ -29,11 +29,11 @@ QLabel#taskHeading { color: #c9dbdf; font-size: 13px; }
 QLabel#notice { color: #c4d8da; background: #19323e; border: 1px solid #2a4b57; border-radius: 10px; padding: 10px; font-size: 11px; }
 QFrame#focusHero { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1c3d4d,stop:1 #112832); border: 1px solid #385661; border-radius: 20px; }
 QFrame#focusCard { background: #132b37; border: 1px solid #25424e; border-radius: 14px; }
-QWidget#focusRoot QLineEdit, QDialog#focusPicker QLineEdit, QWidget#focusRoot QComboBox {
+QWidget#focusRoot QLineEdit, QDialog#focusPicker QLineEdit, QWidget#focusRoot QComboBox, QDialog#focusPicker QComboBox {
     background: #0e2430; color: #e2ebef; border: 1px solid #304c58; border-radius: 9px; padding: 10px; min-height: 18px; selection-background-color: #477275;
 }
 QWidget#focusRoot QLineEdit:focus, QDialog#focusPicker QLineEdit:focus { border-color: #b6a17b; }
-QWidget#focusRoot QComboBox::drop-down { border: none; width: 24px; }
+QWidget#focusRoot QComboBox::drop-down, QDialog#focusPicker QComboBox::drop-down { border: none; width: 24px; }
 QWidget#focusRoot QComboBox QAbstractItemView { background: #17313e; color: #e2ebef; selection-background-color: #30535c; }
 QWidget#focusRoot QPushButton, QDialog#focusPicker QPushButton { color: #c4d9de; background: #1b3643; border: 1px solid #304c58; border-radius: 9px; padding: 9px 12px; min-height: 18px; font-weight: 500; }
 QWidget#focusRoot QPushButton:hover, QDialog#focusPicker QPushButton:hover { background: #254653; border-color: #52737a; }
@@ -678,12 +678,58 @@ def show_study():
     dock.raise_()
 
 
+def choose_wallpaper():
+    dock = ensure_study()
+    dialog = QDialog(mw)
+    dialog.setObjectName('focusPicker')
+    dialog.setWindowTitle('Обои · время суток')
+    dialog.setStyleSheet(STYLE)
+    dialog.setMinimumWidth(370)
+    layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(24, 24, 24, 24)
+    layout.setSpacing(14)
+    layout.addWidget(label('Твоя атмосфера для учёбы', 'sectionTitle'))
+    theme = QComboBox()
+    theme.setAccessibleName('Тема обоев')
+    for key, name in bridge.WALLPAPER_THEMES.items():
+        theme.addItem(name, key)
+    current = bridge.wallpaper_settings(dock.preferences)
+    theme.setCurrentIndex(theme.findData(current['theme']))
+    layout.addWidget(theme)
+    period = QComboBox()
+    period.setAccessibleName('Время суток для обоев')
+    period.addItem('Автоматически · по времени Mac', 'auto')
+    for key, name in bridge.WALLPAPER_PERIODS.items():
+        period.addItem(name, key)
+    period.setCurrentIndex(max(0, period.findData(dock.preferences.get('wallpaper_period', 'auto'))))
+    layout.addWidget(period)
+    note = label('Семь состояний суток. Утром солнце слева, вечером — справа.\nВыбор сохранится после перезапуска Anki.')
+    note.setWordWrap(True)
+    layout.addWidget(note)
+    buttons = QHBoxLayout()
+    cancel = QPushButton('Отмена')
+    cancel.clicked.connect(dialog.reject)
+    apply = QPushButton('Применить')
+    apply.clicked.connect(dialog.accept)
+    buttons.addWidget(cancel)
+    buttons.addWidget(apply)
+    layout.addLayout(buttons)
+    if dialog.exec() == QDialog.DialogCode.Accepted:
+        dock.preferences.update(wallpaper_theme=theme.currentData(), wallpaper_period=period.currentData())
+        bridge.save_preferences(PREFS, dock.preferences)
+        update_home_widget()
+
+
 def loaded():
-    mw.addonManager.setWebExports(__name__, r'(wallpaper-(dawn|day|evening|night)\.png|focus-stats\.(js|css))')
+    mw.addonManager.setWebExports(__name__, r'(wallpaper-([a-z]+-)?(predawn|dawn|morning|day|golden|evening|night)\.png|focus-stats\.(js|css))')
     action = QAction('Учебные блоки · Слово', mw)
     action.triggered.connect(show_study)
     mw.form.menuTools.addAction(action)
     mw._slovo_study_action = action
+    wallpaper = QAction('Обои · время суток…', mw)
+    wallpaper.triggered.connect(choose_wallpaper)
+    mw.form.menuTools.addAction(wallpaper)
+    mw._slovo_wallpaper_action = wallpaper
     archive = QAction('Архивировать текущие колоды…', mw)
     archive.triggered.connect(archive_decks)
     mw.form.menuTools.addAction(archive)
@@ -772,7 +818,7 @@ def unloaded():
         mw.form.menuTools.removeAction(action)
         action.deleteLater()
         mw._slovo_study_action = None
-    for name in ('_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action', '_slovo_tracking_action'):
+    for name in ('_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action', '_slovo_tracking_action', '_slovo_wallpaper_action'):
         extra = getattr(mw, name, None)
         if extra:
             mw.form.menuTools.removeAction(extra)
@@ -793,20 +839,55 @@ HOME_SCRIPT = r'''
    html body .container.modern-main-menu::before {
     background-image:var(--slovo-wallpaper) !important;
    }
+   html body .container.modern-main-menu::after {
+    content:'';position:absolute;top:50%;left:50%;width:100%;height:100%;
+    transform:var(--slovo-wallpaper-transform,translate(-50%,-50%));
+    background-image:var(--slovo-wallpaper-next,none) !important;
+    background-size:cover;background-position:center;background-repeat:no-repeat;
+    filter:var(--slovo-wallpaper-filter,none);z-index:0;pointer-events:none;
+    opacity:var(--slovo-wallpaper-fade,0) !important;
+    transition:var(--slovo-wallpaper-transition,opacity 1.2s ease) !important;
+   }
+   @media(prefers-reduced-motion:reduce){html body .container.modern-main-menu::after{transition:none !important;}}
    #onigiri-heatmap-container .heatmap-day-cell.today {
     outline:1px solid #e26666 !important;outline-offset:1px;border-radius:3px;
    }
    #onigiri-heatmap-container .heatmap-day-cell.today .day-shape {animation:none !important;}
   `;
   document.head.appendChild(style);
+  let pending='', generation=0, fadeTimer;
   const updateDaylight=()=>{
-   const scene=window.slovoHomeState?.scene;
-   if(!scene)return;
-   if(document.documentElement.dataset.slovoScene===scene)return;
-   const url='/_addons/ADDON_PACKAGE/wallpaper-'+scene+'.png';
-   const preload=new Image();preload.onload=()=>{
-    document.documentElement.style.setProperty('--slovo-wallpaper','url("'+url+'")');
-    document.documentElement.dataset.slovoScene=scene;
+   const wallpaper=window.slovoHomeState?.wallpaper;
+   if(!wallpaper)return;
+   const root=document.documentElement, key=wallpaper.path;
+   if(root.dataset.slovoWallpaper===key){
+    if(pending){++generation;pending='';clearTimeout(fadeTimer);root.style.setProperty('--slovo-wallpaper-fade','0');}
+    return;
+   }
+   if(pending===key)return;
+   pending=key;const token=++generation;
+   clearTimeout(fadeTimer);
+   root.style.setProperty('--slovo-wallpaper-fade','0');
+   const url='/_addons/ADDON_PACKAGE/'+key, value='url("'+url+'")';
+   const preload=new Image();preload.onerror=()=>{if(token===generation)pending='';};
+   preload.onload=()=>{
+    if(token!==generation)return;
+    const finish=()=>{
+     if(token!==generation)return;
+     root.style.setProperty('--slovo-wallpaper',value);
+     root.style.setProperty('--slovo-wallpaper-transition','none');
+     root.style.setProperty('--slovo-wallpaper-fade','0');
+     root.dataset.slovoWallpaper=key;root.dataset.slovoScene=wallpaper.scene;pending='';
+     requestAnimationFrame(()=>requestAnimationFrame(()=>{if(token===generation)root.style.removeProperty('--slovo-wallpaper-transition');}));
+    };
+    if(!root.dataset.slovoWallpaper||matchMedia('(prefers-reduced-motion:reduce)').matches){finish();return;}
+    const main=document.querySelector('.container.modern-main-menu');
+    const appearance=getComputedStyle(main,'::before');
+    root.style.setProperty('--slovo-wallpaper-transform',appearance.transform);
+    root.style.setProperty('--slovo-wallpaper-filter',appearance.filter);
+    root.style.setProperty('--slovo-wallpaper-next',value);
+    root.style.setProperty('--slovo-wallpaper-fade',appearance.opacity);
+    fadeTimer=setTimeout(finish,1250);
    };preload.src=url;
   };
   window.slovoUpdateDaylight=updateDaylight;
@@ -826,13 +907,15 @@ HOME_SCRIPT = r'''
    #slovo-home-focus .sf-fill {height:100%;background:#d9ba82;width:0%;transition:width .4s}
    #slovo-home-focus .sf-sub {font-size:10px;color:#9ab5be;line-height:1.5}
    #slovo-home-focus button {box-sizing:border-box;border:0;border-radius:10px;background:#e3bd7e;color:#132a35;padding:10px 12px;width:100%;font:inherit;font-size:12px;font-weight:600;margin-top:14px;cursor:pointer}
+   #slovo-home-focus .sf-wallpaper {margin-top:8px;padding:5px;background:transparent;color:#a9c4cc;font-size:10px;font-weight:400}
    #slovo-archive-link {order:999;margin:10px 20px;font-size:11px;color:inherit;opacity:.65;cursor:pointer;background:transparent;border:0;text-align:left}
   </style><div class="sf-top"><span class="sf-phase">ФОКУС</span><span class="sf-count">0 / 5</span></div>
   <div class="sf-time">80:00</div><div class="sf-task">Выбери задачи для блока</div>
   <div class="sf-track"><div class="sf-fill"></div></div>
   <div class="sf-sub">80 мин учёбы · отдых 10 / 30 мин</div>
-  <button type="button">Настроить блок →</button>`;
+  <button type="button">Настроить блок →</button><button class="sf-wallpaper" type="button">Обои · время суток</button>`;
   el.querySelector('button').onclick = () => pycmd('slovo:open');
+  el.querySelector('.sf-wallpaper').onclick = () => pycmd('slovo:wallpaper');
   host.appendChild(el);
   const timer = setInterval(() => {
    if (!el.isConnected) {clearInterval(timer);return;}
@@ -955,7 +1038,7 @@ def update_home_widget(*_):
         'archive': str((mw.col.get_config('slovo_archive') or {}).get('deck_id', '')),
         'tasks': [{'id': task.get('occurrence_id'), 'title': bridge.task_display_title(task),
                    'selected': task.get('occurrence_id') in chosen} for task in tasks],
-        'scene': bridge.wallpaper_scene(),
+        'wallpaper': bridge.wallpaper_settings(dock.preferences if dock else {}),
         'selected': len(chosen),
         'connected': bool(dock and dock.preferences.get('token')),
         'planBusy': bool(dock and dock.plan_busy),
@@ -981,6 +1064,9 @@ def home_message(handled, message, context):
         return True, None
     if message == 'slovo:open':
         show_study()
+        return True, None
+    if message == 'slovo:wallpaper':
+        choose_wallpaper()
         return True, None
     if message == 'slovo:refresh':
         dock = ensure_study()
