@@ -612,6 +612,8 @@ class StudyDock(QDockWidget):
         apps_layout.addLayout(apps_title)
         self.app_summary = label('Arc', 'taskHeading')
         apps_layout.addWidget(self.app_summary)
+        self.auto_apps_note = label('Проверяю автоматический допуск учебных приложений…')
+        apps_layout.addWidget(self.auto_apps_note)
         self.app_picker_button = QPushButton('Выбрать приложения  →')
         self.app_picker_button.clicked.connect(self.pick_apps)
         apps_layout.addWidget(self.app_picker_button)
@@ -625,7 +627,8 @@ class StudyDock(QDockWidget):
         picker_layout.setContentsMargins(22, 22, 22, 22)
         picker_layout.setSpacing(14)
         picker_layout.addWidget(label('Что понадобится для учёбы?', 'sectionTitle'))
-        picker_layout.addWidget(label('Выбери до старта. Твой выбор сохранится для следующего блока.'))
+        self.picker_note = label('Выбери до старта. Твой выбор сохранится для следующего блока.')
+        picker_layout.addWidget(self.picker_note)
         self.search = QLineEdit()
         self.search.setPlaceholderText('Поиск приложений…')
         self.search.textChanged.connect(self.filter_apps)
@@ -633,7 +636,8 @@ class StudyDock(QDockWidget):
         self.apps = QListWidget()
         selected = self.preferences.get('apps', ['company.thebrowser.Browser'])
         permanent = {'net.ankiweb.anki', 'com.apple.Photos', 'com.apple.finder', 'com.apple.systempreferences'}
-        for bundle, name in bridge.applications():
+        self.application_names = dict(bridge.applications())
+        for bundle, name in self.application_names.items():
             if bundle in permanent:
                 continue
             item = QListWidgetItem(name)
@@ -751,6 +755,10 @@ class StudyDock(QDockWidget):
             locked = bool(session) and phase != 'prepare'
             for control in (self.title, self.task_list, self.apps, self.refresh, self.pair, self.app_picker_button):
                 control.setEnabled(not locked)
+            # During focus this opens a read-only list explaining which forgotten
+            # tools are already admitted by the protected service.
+            self.app_picker_button.setEnabled(not locked or phase == 'focus')
+            self.update_auto_apps()
             for control in (self.mode, self.auto_next, self.series_blocks, self.blackout):
                 control.setEnabled(not session)
             self.update_start_enabled()
@@ -941,13 +949,36 @@ class StudyDock(QDockWidget):
                 item.checkState() != Qt.CheckState.Checked, item.text().casefold())):
             self.apps.addItem(item)
 
+    def update_auto_apps(self):
+        automatic = (self.state or {}).get('auto_study_apps', {})
+        names = [name for bundle, name in self.application_names.items() if bundle in automatic]
+        self.auto_apps_note.setText(
+            'Забыл отметить? Zoom, код, конспекты и PDF доступны автоматически во время фокуса.'
+            if automatic else 'Автодопуск ещё не установлен. Обнови службу через install-study.command.')
+        self.auto_apps_note.setToolTip('Автоматически: ' + ', '.join(names) if automatic else '')
+        for index in range(self.apps.count()):
+            item = self.apps.item(index)
+            bundle = item.data(Qt.ItemDataRole.UserRole)
+            name = self.application_names[bundle]
+            item.setText(name + (' · автоматически' if bundle in automatic else ''))
+            item.setToolTip(name + (' — доступно даже без галочки во время фокуса; на отдыхе закрыто.' if bundle in automatic else ' — выбери до начала блока или между блоками.'))
+        self.update_app_summary()
+
     def pick_apps(self):
+        editable = self.can_edit()
+        automatic = (self.state or {}).get('auto_study_apps', {})
+        self.picker_note.setText(
+            ('Приложения с пометкой «автоматически» уже разрешены без галочки. Остальной выбор зафиксирован до конца блока.'
+             if automatic else 'Блок идёт. Выбор зафиксирован; автодопуск требует обновления службы.')
+            if not editable else
+            ('С пометкой «автоматически» можно открыть даже без галочки. Остальные выбери до старта. Выбор сохранится.'
+             if automatic else 'Выбери до старта. Твой выбор сохранится для следующего блока.'))
         previous = {self.apps.item(i).data(Qt.ItemDataRole.UserRole): self.apps.item(i).checkState()
                     for i in range(self.apps.count())}
         self.search.clear()
         self.sort_apps()
         self.apps.scrollToTop()
-        if self.picker.exec() != QDialog.DialogCode.Accepted:
+        if self.picker.exec() != QDialog.DialogCode.Accepted or not self.can_edit() or not editable:
             for index in range(self.apps.count()):
                 item = self.apps.item(index)
                 item.setCheckState(previous[item.data(Qt.ItemDataRole.UserRole)])

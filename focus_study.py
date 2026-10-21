@@ -32,6 +32,30 @@ ESSENTIAL_APPS = frozenset({
     'com.apple.SecurityAgent', 'com.apple.ScreenSaver.Engine',
     'com.apple.systempreferences', 'com.apple.Spotlight',
 })
+# Exact bundle IDs, never names, category metadata or a user-editable claim
+# that an app is educational. Browsers, terminals, media and general messengers
+# deliberately still require selection before focus. This permits tools, not
+# a claim that everything done inside a tool is study.
+AUTO_STUDY_APPS = {
+    'us.zoom.xos': 'Zoom',
+    'com.microsoft.VSCode': 'Visual Studio Code',
+    'com.jetbrains.CLion': 'CLion',
+    'com.jetbrains.pycharm': 'PyCharm',
+    'com.apple.dt.Xcode': 'Xcode',
+    'com.goodnotesapp.x': 'Goodnotes',
+    'com.apple.Notes': 'Заметки',
+    'com.apple.Preview': 'Просмотр PDF',
+    'com.apple.TextEdit': 'TextEdit',
+    'com.apple.iWork.Pages': 'Pages',
+    'com.apple.Pages': 'Pages Creator Studio',
+    'com.apple.iWork.Numbers': 'Numbers',
+    'com.apple.iWork.Keynote': 'Keynote',
+    'com.apple.calculator': 'Калькулятор',
+    'com.apple.Dictionary': 'Словарь',
+    'com.apple.grapher': 'Grapher',
+    'com.softissimo.ReversoContext.macosapp': 'Reverso',
+    'ru.hse.HSEAppX': 'HSE App X',
+}
 BUNDLE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{2,199}\Z')
 DISTRACTION_HOSTS = ('tiktok.com', 'twitch.tv', 'reddit.com', 'netflix.com',
                      'rutube.ru', 'dzen.ru', 'ok.ru', 'facebook.com', '9gag.com')
@@ -180,7 +204,8 @@ def status(boot, now=None, mono=None):
         records.append(value['session'])
     attempts = sum(sum(item.get('attempts', {}).values()) + sum(item.get('app_attempts', {}).values()) for item in records)
     return dict(copy.deepcopy(value), completed_today=completed_today(value, now),
-                attempts_today=attempts, emergency_available=emergency_available(value, now), now=now)
+                attempts_today=attempts, emergency_available=emergency_available(value, now), now=now,
+                auto_study_apps=dict(AUTO_STUDY_APPS))
 
 
 def clean_task(task, grouped=True):

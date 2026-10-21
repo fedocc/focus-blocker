@@ -72,7 +72,10 @@ def guard_study_apps():
     # IDs are validated by the protected module. Hide rather than terminate:
     # no unsaved documents or background processes are killed.
     rest_apps = study_lock.ESSENTIAL_APPS - {'com.apple.Photos', 'com.apple.finder', 'com.apple.Spotlight'}
-    allowed = '{' + ', '.join(json.dumps(app) for app in (rest_apps if resting else current['apps'])) + '}'
+    # Forgotten study tools open immediately; the exception never applies to
+    # mandatory rest and never changes tasks, timer, or the emergency allowance.
+    focus_apps = set(current['apps']) | set(study_lock.AUTO_STUDY_APPS)
+    allowed = '{' + ', '.join(json.dumps(app) for app in sorted(rest_apps if resting else focus_apps)) + '}'
     script = '''tell application "System Events"
         set frontProcess to first application process whose frontmost is true
         set frontID to bundle identifier of frontProcess

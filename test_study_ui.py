@@ -43,6 +43,19 @@ with tempfile.TemporaryDirectory() as folder:
     window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,dock)
     study.start({'task':{'title':'Lecture'},'apps':['company.thebrowser.Browser'],'preset':'pomo25','auto_continue':True,'blocks':4,'blackout':True},'test',*times)
     dock.poll();assert not dock.mode.isEnabled() and not dock.can_edit()
+    assert dock.app_picker_button.isEnabled() and not dock.apps.isEnabled()
+    zoom=next(dock.apps.item(i) for i in range(dock.apps.count()) if dock.apps.item(i).data(Qt.ItemDataRole.UserRole)=='us.zoom.xos')
+    assert 'автоматически' in zoom.text() and zoom.checkState()==Qt.CheckState.Unchecked
+    assert 'автоматически' in dock.auto_apps_note.text()
+    from aqt.qt import QTimer
+    QTimer.singleShot(0,dock.picker.accept)
+    dock.pick_apps()
+    assert 'зафиксирован' in dock.picker_note.text()
+    assert 'us.zoom.xos' not in study.read()['session']['apps']
+    # A stale installed service never gets advertised as offering auto admission.
+    policy=dock.state.pop('auto_study_apps');dock.update_auto_apps()
+    assert 'Обнови' in dock.auto_apps_note.text() and 'автоматически' not in zoom.text()
+    dock.state['auto_study_apps']=policy;dock.update_auto_apps()
     times[0]+=1500;times[1]+=1500;dock.poll()
     assert dock.phase_notice.event['kind']=='overtime'
     assert dock.phase_notice.headline.text()=='25 МИНУТ ВЫПОЛНЕНЫ'
@@ -207,6 +220,8 @@ with tempfile.TemporaryDirectory() as folder:
     assert dock.selected_ids == set(), 'active block selection must not be mutable'
     assert dock.task_list.count() == 2
     # Selected applications come first and saving does not require starting a block.
+    locked_session=dock.state['session']
+    dock.state['session']=None
     for bundle,name,checked in [('z','Z Editor',True),('a','A Unselected',False),('b','B Browser',True)]:
         item=QListWidgetItem(name);item.setData(Qt.ItemDataRole.UserRole,bundle)
         item.setFlags(item.flags()|Qt.ItemFlag.ItemIsUserCheckable)
@@ -220,6 +235,7 @@ with tempfile.TemporaryDirectory() as folder:
     QTimer.singleShot(0, lambda: (dock.apps.item(0).setCheckState(Qt.CheckState.Unchecked),dock.picker.reject()))
     dock.pick_apps()
     assert dock.apps.item(0).checkState() == Qt.CheckState.Checked
+    dock.state['session']=locked_session
     # Wallpaper settings preserve unrelated private preferences and Cancel is inert.
     def change_wallpaper():
         dialog=app.activeModalWidget()

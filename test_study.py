@@ -305,6 +305,39 @@ class StudyHelperTests(unittest.TestCase):
         self.assertNotIn('to activate',script.call_args.args[0])
         self.assertEqual(study.read()['session']['app_attempts'],{})
 
+    def test_forgotten_study_tools_are_allowed_without_changing_commitment(self):
+        study.start({'task': {'title':'Lecture'}, 'apps':['company.thebrowser.Browser']}, 'test-boot',1000,100)
+        before = study.read()
+        # The AppleScript includes exact educational bundle IDs before checking
+        # or hiding the foreground process. Nothing needs to be preselected.
+        with patch.object(study,'clock',return_value=100), patch.object(study.time,'time',return_value=1000), patch.object(guard, 'user_script', return_value='') as script:
+            helper.guard_study_apps()
+        source = script.call_args.args[0]
+        for bundle in ('us.zoom.xos', 'com.microsoft.VSCode', 'com.apple.Preview', 'com.apple.calculator'):
+            self.assertNotIn(bundle, before['session']['apps'])
+            self.assertIn(json.dumps(bundle), source)
+        for bundle in ('com.apple.Music', 'com.apple.TV', 'ru.keepcoder.Telegram', 'com.apple.Safari', 'com.apple.Terminal', 'com.example.Zoom'):
+            self.assertNotIn(json.dumps(bundle), source)
+        after = study.read()
+        after['session'].pop('app_guard_error', None)
+        self.assertEqual(after, before, 'automatic admission does not reset time, change tasks, or spend the emergency exit')
+        policy = study.status('test-boot',1000,100)['auto_study_apps']
+        self.assertEqual(policy['us.zoom.xos'], 'Zoom')
+        self.assertNotIn('com.apple.Music', policy)
+
+    def test_automatic_tools_are_not_exempt_from_mandatory_rest_or_ready(self):
+        session = study.start({'task': {'title':'Lecture'}, 'apps':[],
+                              'preset':'pomo25', 'blackout':True, 'auto_continue':True, 'blocks':4}, 'test-boot',1000,100)
+        study.start_break({'session_id':session['id']}, 'test-boot',2500,1600)
+        for now, mono, expected in ((2501,1601,'break'), (2800,1900,'ready')):
+            with patch.object(study,'clock',return_value=mono), patch.object(study.time,'time',return_value=now), patch.object(guard,'user_script',return_value='us.zoom.xos') as script:
+                helper.guard_study_apps()
+            self.assertEqual(study.read()['session']['phase'], expected)
+            source = script.call_args.args[0]
+            for bundle in study.AUTO_STUDY_APPS:
+                self.assertNotIn(json.dumps(bundle), source)
+            self.assertIn('set frontmost of application process "Anki" to true', source)
+
     def test_entertainment_domains_close_without_touching_documentation(self):
         study.start({'task': {'title': 'Учёба'}, 'apps': []}, 'test-boot')
         def tabs(*urls):
