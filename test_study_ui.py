@@ -41,6 +41,14 @@ with tempfile.TemporaryDirectory() as folder:
     ui.StudyDock.run=lambda self,work,done:done(work())
     dock=ui.StudyDock();window._slovo_study_dock=dock
     window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,dock)
+    assert dock.mode.findData('pomo50')>=0
+    dock.mode.setCurrentIndex(dock.mode.findData('pomo50'))
+    dock.title.setText('Lecture')
+    supported=dock.state.pop('supported_study_presets')
+    with patch.object(ui.QMessageBox,'question',side_effect=AssertionError('old service must not offer a start confirmation')):
+        dock.start_block()
+    assert 'Обнови системную службу' in dock.message.text() and not study.STATE.exists()
+    dock.state['supported_study_presets']=supported
     study.start({'task':{'title':'Lecture'},'apps':['company.thebrowser.Browser'],'preset':'pomo25','auto_continue':True,'blocks':4,'blackout':True},'test',*times)
     dock.poll();assert not dock.mode.isEnabled() and not dock.can_edit()
     assert dock.app_picker_button.isEnabled() and not dock.apps.isEnabled()
@@ -70,6 +78,7 @@ with tempfile.TemporaryDirectory() as folder:
     assert not w.back.isHidden() and dock.state['session']['phase']=='ready'
     w.back.click()
     assert dock.state['session']['phase']=='prepare' and dock.can_edit()
+    assert dock.state['session']['remaining']==300
     assert not w.isVisible() and not dock.mode.isEnabled()
     assert dock.start.isEnabled() and 'Начать сейчас' in dock.start.text()
     task={'title':'Zoom lecture','occurrence_id':'zoom','url':ui.bridge.ORIGIN+'/?task=zoom'}
@@ -83,7 +92,9 @@ with tempfile.TemporaryDirectory() as folder:
     assert 'us.zoom.xos' in study.read()['session']['apps']
     dock.resize(400,1000);dock.show();window.show();app.processEvents()
     dock.grab().save('/tmp/focus-pomodoro-controls-preview.png')
-    times[0]+=120;times[1]+=120;dock.poll()
+    times[0]+=299;times[1]+=299;dock.poll()
+    assert dock.state['session']['phase']=='prepare' and dock.state['session']['remaining']==1
+    times[0]+=1;times[1]+=1;dock.poll()
     assert dock.state['session']['phase']=='focus' and not dock.can_edit()
     assert dock.state['session']['task']['title']=='Zoom lecture'
     with patch.object(ui.QMessageBox,'question',return_value=ui.QMessageBox.StandardButton.Yes),patch.object(ui.QInputDialog,'getText',return_value=('ПОДТВЕРЖДАЮ',True)):

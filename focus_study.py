@@ -20,11 +20,12 @@ STATE = BASE / 'study.json'
 FOCUS = 80 * 60
 EMERGENCY_WAIT = 0
 CONFIRMATION = 'ПОДТВЕРЖДАЮ'
-PREPARE = 120
+PREPARE = 300
 PRESETS = {'deep80': (4800, 600, 1800, 2),
            'pomo20': (1200, 300, 1800, 4),
            'pomo25': (1500, 300, 1800, 4),
-           'pomo30': (1800, 300, 1800, 4)}
+           'pomo30': (1800, 300, 1800, 4),
+           'pomo50': (3000, 420, 1800, 2)}
 ESSENTIAL_APPS = frozenset({
     'net.ankiweb.anki', 'com.apple.Photos', 'com.apple.finder',
     'com.apple.systemuiserver', 'com.apple.dock', 'com.apple.controlcenter',
@@ -205,7 +206,8 @@ def status(boot, now=None, mono=None):
     attempts = sum(sum(item.get('attempts', {}).values()) + sum(item.get('app_attempts', {}).values()) for item in records)
     return dict(copy.deepcopy(value), completed_today=completed_today(value, now),
                 attempts_today=attempts, emergency_available=emergency_available(value, now), now=now,
-                auto_study_apps=dict(AUTO_STUDY_APPS))
+                auto_study_apps=dict(AUTO_STUDY_APPS),
+                supported_study_presets=list(PRESETS), prepare_seconds=PREPARE)
 
 
 def clean_task(task, grouped=True):
@@ -297,7 +299,7 @@ def next_block(request, boot, now=None, mono=None, action='ready'):
     else:
         if session['phase'] != 'prepare':
             save(value)
-            raise RuntimeError('Менять задачи можно только в двухминутном окне подготовки.')
+            raise RuntimeError('Менять задачи можно только в пятиминутном окне подготовки.')
         task = clean_task(request['task'])
         apps = request['apps']
         if not isinstance(apps, list) or len(apps) > 100 or any(not isinstance(app, str) or not BUNDLE_ID.fullmatch(app) for app in apps):

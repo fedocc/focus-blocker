@@ -56,7 +56,7 @@ class PomodoroTests(unittest.TestCase):
                         self.assertEqual(session['phase'], 'ready')
                         self.assertEqual(self.advance(5000)['session']['phase'], 'ready')
                         self.next(session)
-                        self.assertEqual(self.advance(119)['session']['phase'], 'prepare')
+                        self.assertEqual(self.advance(299)['session']['phase'], 'prepare')
                         session = self.advance(1)['session']
                         self.assertEqual(session['phase'], 'focus')
                         self.assertEqual(session['remaining'], focus)
@@ -91,14 +91,24 @@ class PomodoroTests(unittest.TestCase):
             self.assertEqual(rest['remaining'],expected)
             self.assertIsNone(self.advance(expected)['session'])
 
+    def test_50_7_repeats_long_rest_after_every_two_blocks(self):
+        self.assertEqual(study.PRESETS['pomo50'], (3000,420,1800,2))
+        for expected in (420,1800,420,1800):
+            session=study.start({'task':{'title':'Study'},'apps':[],'preset':'pomo50'},self.boot,self.now,self.mono)
+            self.advance(3010)
+            rest=self.rest(session)
+            self.assertEqual(rest['remaining'],expected)
+            self.assertEqual(study.read()['history'][-1]['seconds'],3010)
+            self.assertIsNone(self.advance(expected)['session'])
+
     def test_late_selection_cannot_reset_or_modify_autostarted_block(self):
         session = self.start()
         self.advance(1500)
         self.rest(session)
         session = self.advance(300)['session']
         self.next(session)
-        self.now += 120
-        self.mono += 120
+        self.now += 300
+        self.mono += 300
         with self.assertRaises(RuntimeError):
             self.next(session, 'update', task={'title':'Late'}, apps=[])
         state = study.read()
@@ -115,7 +125,7 @@ class PomodoroTests(unittest.TestCase):
         self.next(session)
         self.advance(60)
         state = study.status('newboot', self.now+100000, 10)
-        self.assertEqual(state['session']['remaining'], 60)
+        self.assertEqual(state['session']['remaining'], 240)
         state = study.status('newboot', self.now+200000, 100000)
         self.assertEqual(state['session']['phase'], 'focus')
         self.assertEqual(state['session']['remaining'], 1500)

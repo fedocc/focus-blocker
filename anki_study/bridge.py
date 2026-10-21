@@ -15,7 +15,8 @@ ORIGIN = 'https://slovo.45-80-228-215.sslip.io'
 HELPER = '/Library/PrivilegedHelperTools/focus-open/focus-helper'
 COMMANDS = {'study-status', 'study-start', 'study-break-start', 'study-next-ready', 'study-next-update', 'study-next-start', 'study-emergency-request', 'study-emergency-confirm'}
 PRESETS = {'deep80': (80, 10, 30, 2), 'pomo20': (20, 5, 30, 4),
-           'pomo25': (25, 5, 30, 4), 'pomo30': (30, 5, 30, 4)}
+           'pomo25': (25, 5, 30, 4), 'pomo30': (30, 5, 30, 4),
+           'pomo50': (50, 7, 30, 2)}
 
 
 def cycle_text(preset):

@@ -560,7 +560,8 @@ class StudyDock(QDockWidget):
         self.blackout.setStyleSheet('color:#c4d9de;')
         self.blackout.setChecked(self.preferences.get('rest_blackout', True))
         modes.addWidget(self.blackout)
-        modes.addWidget(label('После отдыха — «Я вернулся», затем 2 минуты на задачи. Без изменений продолжатся прежние. После последнего блока серия завершится.'))
+        self.preparation_note = label('После отдыха — «Я вернулся», затем 5 минут на задачи. Без изменений продолжатся прежние. После последнего блока серия завершится.')
+        modes.addWidget(self.preparation_note)
         for control, signal in ((self.mode, self.mode.currentIndexChanged), (self.auto_next, self.auto_next.toggled),
                                 (self.series_blocks, self.series_blocks.valueChanged), (self.blackout, self.blackout.toggled)):
             signal.connect(self.save_mode)
@@ -751,6 +752,8 @@ class StudyDock(QDockWidget):
             update_home_widget()
             session = value['session']
             phase = session['phase'] if session else 'idle'
+            prepare_minutes = value.get('prepare_seconds', 120) // 60
+            self.preparation_note.setText(f'После отдыха — «Я вернулся», затем {prepare_minutes} мин на задачи. Без изменений продолжатся прежние. После последнего блока серия завершится.')
             overtime = bool(session and session.get('awaiting_rest'))
             locked = bool(session) and phase != 'prepare'
             for control in (self.title, self.task_list, self.apps, self.refresh, self.pair, self.app_picker_button):
@@ -776,8 +779,8 @@ class StudyDock(QDockWidget):
             attempts = sum(session.get('attempts', {}).values()) + sum(session.get('app_attempts', {}).values()) if session else 0
             self.progress.setText(('Минимум выполнен. Дополнительное время учитывается; отдых ждёт подтверждения.' if overtime else
                                    'Перерыв перед следующим блоком.' if phase == 'break' else
-                                   'Нажми «Я вернулся» — начнутся 2 минуты выбора.' if phase == 'ready' else
-                                   'Через 2 минуты блок начнётся автоматически. Выбор сохраняется сразу.' if phase == 'prepare' else
+                                   f'Нажми «Я вернулся» — начнутся {prepare_minutes} мин выбора.' if phase == 'ready' else
+                                   f'На выбор — {prepare_minutes} мин, затем блок начнётся автоматически. Выбор сохраняется сразу.' if phase == 'prepare' else
                                    f'Настройки зафиксированы · блокировок: {attempts}' if phase == 'focus' else 'Выбери режим и число блоков в серии.') +
                                   f'\nСрабатываний за день: {value.get("attempts_today", 0)}')
             if session:
@@ -1067,12 +1070,15 @@ class StudyDock(QDockWidget):
             if not (self.state or {}).get('supports_pomodoro'):
                 self.message.setText('Обнови системную службу через install-study.command: она ещё не поддерживает новые режимы, экран отдыха и автопродолжение.')
                 return
+            if self.mode.currentData() not in (self.state or {}).get('supported_study_presets', []):
+                self.message.setText('Обнови системную службу через install-study.command: для режима 50/7 и пяти минут выбора нужна новая версия.')
+                return
             payload.update(preset=self.mode.currentData(), auto_continue=self.auto_next.isChecked(),
                            blocks=self.series_blocks.value(), blackout=self.blackout.isChecked())
             count = self.series_blocks.value() if self.auto_next.isChecked() else 1
             answer = QMessageBox.question(self, 'Начать серию?', bridge.cycle_text(self.mode.currentData()) +
                 f'\nБлоков: {count}. После старта режим и длина серии фиксируются.\n' +
-                ('После отдыха — подтверждение возвращения и 2 минуты выбора, затем автозапуск.\n' if self.auto_next.isChecked() else '') +
+                ('После отдыха — подтверждение возвращения и 5 минут выбора, затем автозапуск.\n' if self.auto_next.isChecked() else '') +
                 ('Во время отдыха экран чёрный, переключение приложений возвращает в Anki.\n' if self.blackout.isChecked() else '') +
                 'Экстренное прерывание: «Да», затем ПОДТВЕРЖДАЮ. Один раз в день.\nСохрани документы перед стартом.')
             if answer != QMessageBox.StandardButton.Yes:
