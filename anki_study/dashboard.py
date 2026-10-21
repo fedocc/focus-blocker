@@ -33,6 +33,8 @@ QWidget#focusRoot QLineEdit, QDialog#focusPicker QLineEdit, QWidget#focusRoot QC
     background: #0e2430; color: #e2ebef; border: 1px solid #304c58; border-radius: 9px; padding: 10px; min-height: 18px; selection-background-color: #477275;
 }
 QWidget#focusRoot QLineEdit:focus, QDialog#focusPicker QLineEdit:focus { border-color: #b6a17b; }
+QWidget#focusRoot QSpinBox { background:#0e2430; color:#e2ebef; border:1px solid #304c58; border-radius:7px; padding:6px 8px; min-height:20px; }
+QWidget#focusRoot QSpinBox:disabled { color:#718a95; border-color:#213b47; }
 QWidget#focusRoot QComboBox::drop-down, QDialog#focusPicker QComboBox::drop-down { border: none; width: 24px; }
 QWidget#focusRoot QComboBox QAbstractItemView { background: #17313e; color: #e2ebef; selection-background-color: #30535c; }
 QWidget#focusRoot QPushButton, QDialog#focusPicker QPushButton { color: #c4d9de; background: #1b3643; border: 1px solid #304c58; border-radius: 9px; padding: 9px 12px; min-height: 18px; font-weight: 500; }
@@ -392,6 +394,9 @@ class RestWindow(QDialog):
         self.back = QPushButton('Я вернулся · выбрать следующий блок')
         self.back.clicked.connect(dock.prepare_next)
         layout.addWidget(self.back, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.shorten = QPushButton('Сократить до короткого отдыха')
+        self.shorten.clicked.connect(dock.shorten_rest)
+        layout.addWidget(self.shorten, alignment=Qt.AlignmentFlag.AlignCenter)
         emergency = QPushButton('Экстренное прерывание')
         emergency.clicked.connect(dock.request_emergency)
         layout.addWidget(emergency, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -431,6 +436,9 @@ class RestScreen:
             window.heading.setText('ПЕРЕРЫВ ЗАВЕРШЁН' if ready else 'ОТДЫХ')
             window.clock.setText('00:00' if ready else f'{seconds // 60:02}:{seconds % 60:02}')
             window.back.setVisible(ready)
+            window.shorten.setVisible(self.dock.can_shorten_rest())
+            window.shorten.setEnabled(not self.dock.busy)
+            window.heading.setText('ПЕРЕРЫВ ЗАВЕРШЁН' if ready else 'ДЛИННЫЙ ОТДЫХ' if session.get('break_kind') == 'long' else 'ОТДЫХ')
             if not window.isVisible():
                 window.show()
                 window.raise_()
@@ -539,14 +547,25 @@ class StudyDock(QDockWidget):
         self.cycle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hero.addWidget(self.cycle)
         _, modes = card(layout)
-        modes.addWidget(label('Режим фокуса', 'sectionTitle'))
-        self.mode = QComboBox()
-        self.mode.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        for key in bridge.PRESETS:
-            minutes, short, long, every = bridge.PRESETS[key]
-            self.mode.addItem(f'{minutes} / {short} · {long} мин после {every} блоков', key)
-        self.mode.setCurrentIndex(max(0, self.mode.findData(self.preferences.get('focus_mode', 'pomo25'))))
-        modes.addWidget(self.mode)
+        modes.addWidget(label('Твой ритм', 'sectionTitle'))
+        timing = bridge.timing_settings(self.preferences)
+        self.timing_controls = {}
+        for key, title, maximum in (('focus', 'Учёба', 240), ('short', 'Короткий отдых', 60),
+                                     ('long', 'Длинный отдых', 180), ('every', 'Блоков до длинного', 12)):
+            row = QHBoxLayout()
+            row.addWidget(label(title))
+            row.addStretch()
+            control = QSpinBox()
+            control.setRange(1, maximum)
+            control.setValue(timing[key])
+            control.setSuffix(' бл.' if key == 'every' else ' мин')
+            control.setAccessibleName(title)
+            control.setFixedWidth(110)
+            row.addWidget(control)
+            modes.addLayout(row)
+            self.timing_controls[key] = control
+        self.timing_controls['long'].setMinimum(self.timing_controls['short'].value())
+        self.timing_controls['short'].valueChanged.connect(self.timing_controls['long'].setMinimum)
         self.auto_next = QCheckBox('Автопродолжение серии')
         self.auto_next.setStyleSheet('color:#c4d9de;')
         self.auto_next.setChecked(self.preferences.get('auto_next', True))
@@ -562,13 +581,14 @@ class StudyDock(QDockWidget):
         modes.addWidget(self.blackout)
         self.preparation_note = label('После отдыха — «Я вернулся», затем 5 минут на задачи. Без изменений продолжатся прежние. После последнего блока серия завершится.')
         modes.addWidget(self.preparation_note)
-        for control, signal in ((self.mode, self.mode.currentIndexChanged), (self.auto_next, self.auto_next.toggled),
-                                (self.series_blocks, self.series_blocks.valueChanged), (self.blackout, self.blackout.toggled)):
+        for control, signal in ([(control, control.valueChanged) for control in self.timing_controls.values()] +
+                                [(self.auto_next, self.auto_next.toggled), (self.series_blocks, self.series_blocks.valueChanged), (self.blackout, self.blackout.toggled)]):
             signal.connect(self.save_mode)
-        self.cycle.setText(bridge.cycle_text(self.mode.currentData()))
+        self.cycle.setText(bridge.cycle_text(self.timing_values()))
+        self.timer_label.setText(f'{self.timing_values()["focus"]:02}:00')
         day_row = QHBoxLayout()
         day_row.addWidget(label('ТВОЙ ДЕНЬ', 'eyebrow'))
-        self.day_count = label('0 / 5', 'sectionTitle')
+        self.day_count = label('0 за день', 'sectionTitle')
         day_row.addStretch()
         day_row.addWidget(self.day_count)
         layout.addLayout(day_row)
@@ -577,7 +597,7 @@ class StudyDock(QDockWidget):
         self.day_progress.setTextVisible(False)
         self.day_progress.setFixedHeight(6)
         layout.addWidget(self.day_progress)
-        self.progress = label('Пять основных блоков. Шестой — по желанию.')
+        self.progress = label('Выбери задачи и длительности для серии.')
         layout.addWidget(self.progress)
         self.task_card, task_layout = card(layout)
         task_layout.addWidget(label('01   Задачи блока', 'sectionTitle'))
@@ -688,6 +708,10 @@ class StudyDock(QDockWidget):
         self.emergency.clicked.connect(self.request_emergency)
         self.emergency.hide()
         footer_layout.addWidget(self.emergency)
+        self.shorten = QPushButton('Сократить длинный отдых до короткого')
+        self.shorten.clicked.connect(self.shorten_rest)
+        self.shorten.hide()
+        footer_layout.addWidget(self.shorten)
         result_row = QHBoxLayout()
         self.proof = QPushButton('↗  Результат в Слове')
         self.proof.setObjectName('quiet')
@@ -762,14 +786,16 @@ class StudyDock(QDockWidget):
             # tools are already admitted by the protected service.
             self.app_picker_button.setEnabled(not locked or phase == 'focus')
             self.update_auto_apps()
-            for control in (self.mode, self.auto_next, self.series_blocks, self.blackout):
+            for control in (*self.timing_controls.values(), self.auto_next, self.series_blocks, self.blackout):
                 control.setEnabled(not session)
+            self.shorten.setVisible(self.can_shorten_rest())
+            self.shorten.setEnabled(not self.busy)
             self.update_start_enabled()
             self.emergency.setEnabled(bool(session) and value['emergency_available'])
             self.emergency.setVisible(bool(session))
             self.phase_tag.setText('ДОПОЛНИТЕЛЬНОЕ ВРЕМЯ' if overtime else {'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА', 'ready': 'ПЕРЕРЫВ ЗАВЕРШЁН', 'prepare': 'ВЫБОР СЛЕДУЮЩЕГО БЛОКА'}[phase])
             self.start.setText('Начать отдых   →' if overtime else {'idle': 'Начать серию   →', 'focus': 'Блок идёт · настройки закрыты', 'break': 'Сначала восстановись', 'ready': 'Я вернулся · выбрать задачи →', 'prepare': 'Начать сейчас →'}[phase])
-            self.cycle.setText(bridge.cycle_text((session or {}).get('preset', self.mode.currentData())))
+            self.cycle.setText(bridge.cycle_text(session or self.timing_values()))
             self.tick_display()
             count = value['completed_today']
             total = (session or {}).get('blocks_total', 0)
@@ -827,19 +853,23 @@ class StudyDock(QDockWidget):
             extra = int(bridge.overtime_seconds(self.state))
             self.timer_label.setText(f'+{extra // 60:02}:{extra % 60:02}')
             return
-        seconds = math.ceil(bridge.remaining_seconds(self.state)) if (self.state or {}).get('session') else bridge.PRESETS[self.mode.currentData()][0] * 60
+        seconds = math.ceil(bridge.remaining_seconds(self.state)) if (self.state or {}).get('session') else self.timing_values()['focus'] * 60
         self.timer_label.setText(f'{seconds // 60:02}:{seconds % 60:02}')
 
     def can_edit(self):
         return not (self.state or {}).get('session') or self.state['session']['phase'] == 'prepare'
 
+    def timing_values(self):
+        return {key: control.value() for key, control in self.timing_controls.items()}
+
     def save_mode(self, *_):
         if (self.state or {}).get('session'):
             return
-        self.preferences.update(focus_mode=self.mode.currentData(), auto_next=self.auto_next.isChecked(),
+        self.preferences.pop('focus_mode', None)
+        self.preferences.update(timing=self.timing_values(), auto_next=self.auto_next.isChecked(),
                                 series_blocks=self.series_blocks.value(), rest_blackout=self.blackout.isChecked())
         bridge.save_preferences(PREFS, self.preferences)
-        self.cycle.setText(bridge.cycle_text(self.mode.currentData()))
+        self.cycle.setText(bridge.cycle_text(self.timing_values()))
         self.tick_display()
         update_home_widget()
 
@@ -1070,14 +1100,14 @@ class StudyDock(QDockWidget):
             if not (self.state or {}).get('supports_pomodoro'):
                 self.message.setText('Обнови системную службу через install-study.command: она ещё не поддерживает новые режимы, экран отдыха и автопродолжение.')
                 return
-            if self.mode.currentData() not in (self.state or {}).get('supported_study_presets', []):
-                self.message.setText('Обнови системную службу через install-study.command: для режима 50/7 и пяти минут выбора нужна новая версия.')
+            if not (self.state or {}).get('supports_custom_timing'):
+                self.message.setText('Обнови системную службу через install-study.command: для своих длительностей и сокращения отдыха нужна новая версия.')
                 return
-            payload.update(preset=self.mode.currentData(), auto_continue=self.auto_next.isChecked(),
+            payload.update(timing=self.timing_values(), auto_continue=self.auto_next.isChecked(),
                            blocks=self.series_blocks.value(), blackout=self.blackout.isChecked())
             count = self.series_blocks.value() if self.auto_next.isChecked() else 1
-            answer = QMessageBox.question(self, 'Начать серию?', bridge.cycle_text(self.mode.currentData()) +
-                f'\nБлоков: {count}. После старта режим и длина серии фиксируются.\n' +
+            answer = QMessageBox.question(self, 'Начать серию?', bridge.cycle_text(self.timing_values()) +
+                f'\nБлоков: {count}. После старта длительности и длина серии фиксируются.\n' +
                 ('После отдыха — подтверждение возвращения и 5 минут выбора, затем автозапуск.\n' if self.auto_next.isChecked() else '') +
                 ('Во время отдыха экран чёрный, переключение приложений возвращает в Anki.\n' if self.blackout.isChecked() else '') +
                 'Экстренное прерывание: «Да», затем ПОДТВЕРЖДАЮ. Один раз в день.\nСохрани документы перед стартом.')
@@ -1121,6 +1151,28 @@ class StudyDock(QDockWidget):
             self.update_start_enabled()
             self.poll()
         self.run(lambda: bridge.helper('study-break-start', {'session_id': session['id']}), finished)
+
+    def can_shorten_rest(self):
+        state = self.state or {}
+        session = state.get('session') or {}
+        return bool(state.get('supports_break_shorten') and session.get('phase') == 'break' and
+                    session.get('break_kind') == 'long' and not session.get('break_shortened'))
+
+    def shorten_rest(self):
+        if self.busy or not self.can_shorten_rest():
+            return
+        session_id = self.state['session']['id']
+        self.busy = True
+        self.rest_screen.update()
+        def finished(value):
+            self.busy = False
+            if value is not None:
+                self.state = dict(self.state, session=value['session'])
+                self.tick_display()
+                update_home_widget()
+                self.message.setText('Длинный отдых сокращён. Уже прошедшее время отдыха учтено.')
+            self.poll()
+        self.run(lambda: bridge.helper('study-break-shorten', {'session_id': session_id}), finished)
 
     def request_emergency(self):
         if not (self.state or {}).get('supports_simple_emergency'):
@@ -1683,7 +1735,7 @@ def update_home_widget(*_):
     tasks = dock.tasks if dock and dock.tasks else committed_items
     payload = {
         'phase': 'ДОПОЛНИТЕЛЬНОЕ ВРЕМЯ' if (session or {}).get('awaiting_rest') else {'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА', 'ready': 'ПЕРЕРЫВ ЗАВЕРШЁН', 'prepare': 'ВЫБОР ЗАДАЧ · АВТОСТАРТ'}[phase],
-        'remaining': bridge.remaining_seconds(state) if session else bridge.PRESETS[dock.mode.currentData() if dock else 'pomo25'][0] * 60, 'active': bool(session),
+        'remaining': bridge.remaining_seconds(state) if session else (dock.timing_values() if dock else bridge.timing_settings())['focus'] * 60, 'active': bool(session),
         'awaitingRest': bool((session or {}).get('awaiting_rest')), 'overtime': bridge.overtime_seconds(state),
         'readyNext': phase == 'ready', 'editable': editable,
         'count': (state or {}).get('completed_today', 0),
@@ -1691,8 +1743,8 @@ def update_home_widget(*_):
         'seriesIndex': (session or {}).get('blocks_total', 0) - (session or {}).get('blocks_left', 0) + 1,
         'title': committed.get('title', f'Выбрано задач: {len(chosen)}' if chosen else 'Выбери задачи для блока'),
         'subtitle': ('Отдых начнётся после подтверждения' if (session or {}).get('awaiting_rest') else
-                     'Две минуты на выбор. Затем автоматический старт.' if phase == 'prepare' else
-                     bridge.cycle_text((session or {}).get('preset', dock.mode.currentData() if dock else 'pomo25')) if state else 'Проверяем системный таймер…'),
+                     f'{(state or {}).get("prepare_seconds", 300) // 60} мин на выбор. Затем автоматический старт.' if phase == 'prepare' else
+                     bridge.cycle_text(session or (dock.timing_values() if dock else bridge.timing_settings())) if state else 'Проверяем системный таймер…'),
         'archive': str((mw.col.get_config('slovo_archive') or {}).get('deck_id', '')),
         'tasks': [{'id': task.get('occurrence_id'), 'title': bridge.task_display_title(task),
                    'selected': task.get('occurrence_id') in chosen} for task in tasks],

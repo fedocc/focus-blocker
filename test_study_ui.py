@@ -33,6 +33,8 @@ with tempfile.TemporaryDirectory() as folder:
         if name=='study-status':
             return dict(study.status('test',now,mono),service_running=True,supports_pomodoro=True,supports_simple_emergency=True,supports_confirmed_break=True)
         if name=='study-break-start':return study.start_break(payload,'test',now,mono)
+        if name=='study-break-shorten':return study.shorten_break(payload,'test',now,mono)
+        if name=='study-start':return study.start(payload,'test',now,mono)
         if name.startswith('study-next-'):return study.next_block(payload,'test',now,mono,action=name.removeprefix('study-next-'))
         if name=='study-emergency-request':return study.request_emergency(payload,'test',now,mono)
         if name=='study-emergency-confirm':return study.confirm_emergency(payload,'test',now,mono)
@@ -41,16 +43,20 @@ with tempfile.TemporaryDirectory() as folder:
     ui.StudyDock.run=lambda self,work,done:done(work())
     dock=ui.StudyDock();window._slovo_study_dock=dock
     window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,dock)
-    assert dock.mode.findData('pomo50')>=0
-    dock.mode.setCurrentIndex(dock.mode.findData('pomo50'))
+    assert not hasattr(dock,'mode')
+    for key,value in {'focus':25,'short':5,'long':15,'every':1}.items():
+        dock.timing_controls[key].setValue(value)
     dock.title.setText('Lecture')
-    supported=dock.state.pop('supported_study_presets')
+    supported=dock.state.pop('supports_custom_timing')
     with patch.object(ui.QMessageBox,'question',side_effect=AssertionError('old service must not offer a start confirmation')):
         dock.start_block()
     assert 'Обнови системную службу' in dock.message.text() and not study.STATE.exists()
-    dock.state['supported_study_presets']=supported
-    study.start({'task':{'title':'Lecture'},'apps':['company.thebrowser.Browser'],'preset':'pomo25','auto_continue':True,'blocks':4,'blackout':True},'test',*times)
-    dock.poll();assert not dock.mode.isEnabled() and not dock.can_edit()
+    dock.state['supports_custom_timing']=supported
+    with patch.object(ui.QMessageBox,'question',return_value=ui.QMessageBox.StandardButton.Yes):
+        dock.start_block()
+    assert study.read()['session']['timing']=={'focus':25,'short':5,'long':15,'every':1}
+    assert ui.json.loads(ui.PREFS.read_text())['timing']==dock.timing_values()
+    dock.poll();assert all(not c.isEnabled() for c in dock.timing_controls.values()) and not dock.can_edit()
     assert dock.app_picker_button.isEnabled() and not dock.apps.isEnabled()
     zoom=next(dock.apps.item(i) for i in range(dock.apps.count()) if dock.apps.item(i).data(Qt.ItemDataRole.UserRole)=='us.zoom.xos')
     assert 'автоматически' in zoom.text() and zoom.checkState()==Qt.CheckState.Unchecked
@@ -71,15 +77,18 @@ with tempfile.TemporaryDirectory() as folder:
     assert dock.state['session']['phase']=='break'
     assert dock.rest_screen.windows and all(w.isVisible() for w in dock.rest_screen.windows)
     w=dock.rest_screen.windows[0]
-    assert w.back.isHidden() and w.clock.text()=='05:00'
+    assert w.back.isHidden() and w.clock.text()=='15:00' and not w.shorten.isHidden()
     w.close();assert w.isVisible(),'closing cannot skip mandatory rest'
     w.grab().save('/tmp/focus-pomodoro-rest-preview.png')
-    times[0]+=300;times[1]+=300;dock.poll()
+    times[0]+=60;times[1]+=60;dock.poll()
+    w.shorten.click()
+    assert dock.state['session']['remaining']==240 and w.shorten.isHidden() and w.isVisible()
+    times[0]+=240;times[1]+=240;dock.poll()
     assert not w.back.isHidden() and dock.state['session']['phase']=='ready'
     w.back.click()
     assert dock.state['session']['phase']=='prepare' and dock.can_edit()
     assert dock.state['session']['remaining']==300
-    assert not w.isVisible() and not dock.mode.isEnabled()
+    assert not w.isVisible() and all(not c.isEnabled() for c in dock.timing_controls.values())
     assert dock.start.isEnabled() and 'Начать сейчас' in dock.start.text()
     task={'title':'Zoom lecture','occurrence_id':'zoom','url':ui.bridge.ORIGIN+'/?task=zoom'}
     dock.tasks=[task];dock.render_tasks(dock.tasks)

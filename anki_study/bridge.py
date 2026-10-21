@@ -13,15 +13,28 @@ from xml.parsers.expat import ExpatError
 
 ORIGIN = 'https://slovo.45-80-228-215.sslip.io'
 HELPER = '/Library/PrivilegedHelperTools/focus-open/focus-helper'
-COMMANDS = {'study-status', 'study-start', 'study-break-start', 'study-next-ready', 'study-next-update', 'study-next-start', 'study-emergency-request', 'study-emergency-confirm'}
+COMMANDS = {'study-status', 'study-start', 'study-break-start', 'study-break-shorten', 'study-next-ready', 'study-next-update', 'study-next-start', 'study-emergency-request', 'study-emergency-confirm'}
+# Legacy values only for migrating preferences and displaying old sessions.
 PRESETS = {'deep80': (80, 10, 30, 2), 'pomo20': (20, 5, 30, 4),
            'pomo25': (25, 5, 30, 4), 'pomo30': (30, 5, 30, 4),
            'pomo50': (50, 7, 30, 2)}
 
 
-def cycle_text(preset):
-    focus, short, long, every = PRESETS.get(preset, PRESETS['deep80'])
-    return f'{focus} мин учёбы · {short} мин отдыха · {long} мин после {every} блоков'
+def timing_settings(value=None):
+    if isinstance(value, dict):
+        if 'timing' in value:
+            return dict(value['timing'])
+        if set(value) == {'focus', 'short', 'long', 'every'}:
+            return dict(value)
+        preset = value.get('preset', value.get('focus_mode'))
+    else:
+        preset = value
+    return dict(zip(('focus', 'short', 'long', 'every'), PRESETS.get(preset, (50, 7, 20, 2))))
+
+
+def cycle_text(value):
+    t = timing_settings(value)
+    return f'{t["focus"]} мин учёбы · {t["short"]} мин отдыха · {t["long"]} мин после {t["every"]} блоков'
 
 
 class PhaseAlerts:

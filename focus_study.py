@@ -21,6 +21,7 @@ FOCUS = 80 * 60
 EMERGENCY_WAIT = 0
 CONFIRMATION = 'ПОДТВЕРЖДАЮ'
 PREPARE = 300
+# Compatibility for saved sessions/history; new UI uses explicit timing.
 PRESETS = {'deep80': (4800, 600, 1800, 2),
            'pomo20': (1200, 300, 1800, 4),
            'pomo25': (1500, 300, 1800, 4),
@@ -109,9 +110,28 @@ def duration(session):
     return session.get('focus_seconds', FOCUS)
 
 
+def clean_timing(value):
+    if not isinstance(value, dict) or set(value) != {'focus', 'short', 'long', 'every'}:
+        raise ValueError('Задай учёбу, короткий и длинный отдых и частоту длинного отдыха.')
+    for key, maximum in (('focus', 240), ('short', 60), ('long', 180), ('every', 12)):
+        if type(value[key]) is not int or not 1 <= value[key] <= maximum:
+            raise ValueError('Некорректная длительность или частота отдыха.')
+    if value['long'] < value['short']:
+        raise ValueError('Длинный отдых не может быть короче короткого.')
+    return dict(value)
+
+
+def timing_seconds(session):
+    if 'timing' in session:
+        t = clean_timing(session['timing'])
+        return t['focus'] * 60, t['short'] * 60, t['long'] * 60, t['every']
+    return PRESETS[session.get('preset', 'deep80')]
+
+
 def new_focus(previous, now, mono, boot):
     result = copy.deepcopy(previous)
-    for key in ('awaiting_rest', 'overtime_seconds', 'overtime_anchor_mono', 'app_guard_error'):
+    for key in ('awaiting_rest', 'overtime_seconds', 'overtime_anchor_mono', 'app_guard_error',
+                'break_kind', 'break_seconds', 'break_shortened'):
         result.pop(key, None)
     result.update(id=secrets.token_hex(16), phase='focus', started_at=now, boot=boot,
                   remaining=duration(result), deadline_mono=mono + duration(result),
@@ -184,14 +204,46 @@ def start_break(request, boot, now=None, mono=None):
              ('id', 'task', 'apps', 'started_at', 'attempts', 'app_attempts')}
     ended.update(ended_at=now, outcome='completed', seconds=duration(session) + extra,
                  overtime_seconds=extra, focus_seconds=duration(session), preset=session.get('preset', 'deep80'))
+    if 'timing' in session:
+        ended['timing'] = dict(session['timing'])
     value['history'] = (value['history'] + [ended])[-1000:]
-    _, short, long, every = PRESETS[session.get('preset', 'deep80')]
+    _, short, long, every = timing_seconds(session)
     index = session.get('cycle_index', completed_today(value, now))
     rest = long if index % every == 0 else short
     session.update(phase='break', remaining=rest, deadline_mono=mono + rest,
-                   ends_at=now + rest, emergency=None, awaiting_rest=False)
+                   ends_at=now + rest, emergency=None, awaiting_rest=False,
+                   break_kind='long' if index % every == 0 else 'short',
+                   break_seconds=rest, break_shortened=False)
     save(value)
     return copy.deepcopy(session)
+
+
+def shorten_break(request, boot, now=None, mono=None):
+    """Use the committed short duration measured from the original rest start."""
+    now = time.time() if now is None else now
+    mono = clock() if mono is None else mono
+    if not isinstance(request, dict) or set(request) != {'session_id'}:
+        raise ValueError('Нужен идентификатор блока')
+    value = read()
+    advance(value, now, mono, boot)
+    session = value['session']
+    if not session or session['id'] != request['session_id']:
+        save(value)
+        raise RuntimeError('Блок уже изменился. Обнови состояние.')
+    if session.get('break_shortened') and session['phase'] in ('break', 'ready'):
+        save(value)
+        return {'session': copy.deepcopy(session), 'shortened': True}
+    if session['phase'] != 'break' or session.get('break_kind') != 'long':
+        save(value)
+        raise RuntimeError('Сократить до короткого можно только длинный отдых.')
+    short = timing_seconds(session)[1]
+    elapsed = max(0, session['break_seconds'] - session['remaining'])
+    remaining = max(0, short - elapsed)
+    session.update(break_kind='short', break_seconds=short, break_shortened=True,
+                   remaining=remaining, deadline_mono=mono + remaining, ends_at=now + remaining)
+    advance(value, now, mono, boot)
+    save(value)
+    return {'session': copy.deepcopy(value['session']), 'shortened': True}
 
 
 def status(boot, now=None, mono=None):
@@ -207,7 +259,8 @@ def status(boot, now=None, mono=None):
     return dict(copy.deepcopy(value), completed_today=completed_today(value, now),
                 attempts_today=attempts, emergency_available=emergency_available(value, now), now=now,
                 auto_study_apps=dict(AUTO_STUDY_APPS),
-                supported_study_presets=list(PRESETS), prepare_seconds=PREPARE)
+                supported_study_presets=list(PRESETS), prepare_seconds=PREPARE,
+                supports_custom_timing=True, supports_break_shorten=True)
 
 
 def clean_task(task, grouped=True):
@@ -236,8 +289,11 @@ def clean_task(task, grouped=True):
 def start(request, boot, now=None, mono=None):
     now = time.time() if now is None else now
     mono = clock() if mono is None else mono
-    if not isinstance(request, dict) or not {'task', 'apps'} <= set(request) or set(request) - {'task', 'apps', 'preset', 'auto_continue', 'blocks', 'blackout'}:
+    if not isinstance(request, dict) or not {'task', 'apps'} <= set(request) or set(request) - {'task', 'apps', 'preset', 'timing', 'auto_continue', 'blocks', 'blackout'}:
         raise ValueError('Некорректные настройки блока')
+    timing = clean_timing(request['timing']) if 'timing' in request else None
+    if timing is not None and 'preset' in request:
+        raise ValueError('Выбери собственные длительности без готового режима.')
     preset = request.get('preset', 'deep80')
     if not isinstance(preset, str) or preset not in PRESETS:
         raise ValueError('Неизвестный режим фокуса')
@@ -256,20 +312,26 @@ def start(request, boot, now=None, mono=None):
     if value['session']:
         save(value)
         raise RuntimeError('Текущий блок или обязательный перерыв ещё идёт. Изменения закрыты.')
-    seconds = PRESETS[preset][0]
+    seconds = timing['focus'] * 60 if timing else PRESETS[preset][0]
     value['session'] = {
         'id': secrets.token_hex(16), 'phase': 'focus', 'task': clean,
         'apps': sorted(set(apps) | ESSENTIAL_APPS), 'started_at': now,
         'boot': boot, 'deadline_mono': mono + seconds, 'remaining': seconds,
         'ends_at': now + seconds, 'emergency': None,
-        'preset': preset, 'focus_seconds': seconds, 'auto_continue': auto,
+        'preset': 'custom' if timing else preset, 'focus_seconds': seconds, 'auto_continue': auto,
         'blocks_left': blocks if auto else 1, 'blocks_total': blocks if auto else 1,
         'blackout': blackout, 'series_id': secrets.token_hex(16),
         'attempts': {}, 'app_attempts': {},
     }
+    if timing:
+        value['session']['timing'] = timing
     # Legacy 80-minute single blocks retain the daily alternating rest cycle.
     if auto:
         value['session']['cycle_index'] = 1
+    elif timing:
+        value['session']['cycle_index'] = 1 + sum(
+            item['outcome'] == 'completed' and item.get('timing') == timing and
+            day_at(item['ended_at']) == day_at(now) for item in value['history'])
     elif preset != 'deep80' or 'preset' in request:
         value['session']['cycle_index'] = 1 + sum(
             item['outcome'] == 'completed' and item.get('preset', 'deep80') == preset and

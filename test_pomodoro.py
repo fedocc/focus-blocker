@@ -169,6 +169,125 @@ class PomodoroTests(unittest.TestCase):
         self.assertEqual(sum(r['seconds'] for r in data['records']),1800)
         self.assertEqual(len(data['records']),1)
 
+    def custom(self, **options):
+        request={'task':{'title':'Study'},'apps':[], 'timing':{'focus':47,'short':7,'long':19,'every':2},
+                 'auto_continue':True,'blocks':4,'blackout':True}
+        request.update(options)
+        return study.start(request,self.boot,self.now,self.mono)
+
+    def short(self, session):
+        return study.shorten_break({'session_id':session['id']},self.boot,self.now,self.mono)['session']
+
+    def long_rest(self, blocks=4):
+        session=self.custom(blocks=blocks)
+        for index in range(2):
+            self.advance(47*60)
+            session=self.rest(session)
+            if index==0:
+                session=self.advance(420)['session']
+                self.next(session)
+                session=self.advance(300)['session']
+        self.assertEqual(session['break_kind'],'long')
+        return session
+
+    def test_custom_durations_survive_the_full_series_and_source_mutation(self):
+        timing={'focus':43,'short':6,'long':17,'every':3}
+        session=self.custom(timing=timing)
+        timing['focus']=1
+        for index in range(1,5):
+            self.assertEqual(session['focus_seconds'],2580)
+            self.advance(2580)
+            session=self.rest(session)
+            expected=1020 if index==3 else 360
+            self.assertEqual(session['remaining'],expected)
+            state=self.advance(expected)
+            if index<4:
+                self.next(state['session'])
+                session=self.advance(300)['session']
+        self.assertIsNone(state['session'])
+        self.assertEqual([r['seconds'] for r in state['history']],[2580]*4)
+        self.assertEqual(state['history'][0]['timing']['focus'],43)
+
+    def test_shortening_counts_elapsed_time_and_retries_cannot_extend_it(self):
+        session=self.long_rest()
+        history=copy.deepcopy(study.read()['history'])
+        self.advance(240)
+        shortened=self.short(session)
+        self.assertEqual(shortened['remaining'],180)
+        self.assertEqual(shortened['break_kind'],'short')
+        self.advance(30)
+        again=self.short(session)
+        self.assertEqual(again['remaining'],150)
+        self.assertEqual(again['deadline_mono'],shortened['deadline_mono'])
+        self.assertIsNone(study.read()['last_emergency'])
+        self.assertEqual(study.read()['history'],history)
+        ready=self.advance(150)['session']
+        self.assertEqual(ready['phase'],'ready')
+        self.assertEqual(self.short(ready)['phase'],'ready')
+        self.next(ready)
+        session=self.advance(300)['session']
+        self.assertNotIn('break_shortened',session)
+        self.advance(2820)
+        self.assertEqual(self.rest(session)['remaining'],420)
+
+    def test_shortening_after_short_duration_requires_return_ack_and_finishes_final_series(self):
+        session=self.long_rest()
+        self.advance(600)
+        ready=self.short(session)
+        self.assertEqual(ready['phase'],'ready')
+        self.assertEqual(self.advance(1000)['session']['phase'],'ready')
+        # Independent final two-block series: no phantom next block.
+        study.save({'schema':1,'session':None,'history':[],'last_emergency':None})
+        session=self.long_rest(blocks=2)
+        self.advance(420)
+        self.assertIsNone(self.short(session))
+        self.assertIsNone(study.read()['session'])
+        self.assertEqual(len(study.read()['history']),2)
+
+    def test_shortening_after_reboot_uses_saved_rest_checkpoint_not_wall_time(self):
+        session=self.long_rest()
+        self.advance(120)
+        self.boot='reboot'
+        self.now+=86400
+        self.mono=10
+        resumed=study.status(self.boot,self.now,self.mono)['session']
+        self.assertEqual(resumed['remaining'],1020)
+        shortened=self.short(session)
+        self.assertEqual(shortened['remaining'],300)
+        self.now-=172800
+        self.advance(60)
+        self.assertEqual(self.short(session)['remaining'],240)
+
+    def test_shortening_rejects_focus_short_rest_stale_ids_and_extra_duration(self):
+        session=self.custom()
+        with self.assertRaises(RuntimeError):self.short(session)
+        self.advance(2820)
+        session=self.rest(session)
+        with self.assertRaises(RuntimeError):self.short(session)
+        for request in ({'session_id':'stale'}, {'session_id':session['id'],'seconds':0}):
+            with self.assertRaises((ValueError,RuntimeError)):
+                study.shorten_break(request,self.boot,self.now,self.mono)
+        self.assertEqual(study.read()['session']['remaining'],420)
+
+    def test_custom_validation_and_settings_are_locked_after_start(self):
+        good={'focus':50,'short':7,'long':20,'every':2}
+        for key,bad in (('focus',0),('focus',241),('short',True),('short',61),('long',6),('long',181),('every',0),('every',13),('focus',1.5)):
+            with self.assertRaises(ValueError):self.custom(timing=dict(good,**{key:bad}))
+            self.assertFalse(study.STATE.exists())
+        with self.assertRaises(ValueError):self.custom(timing=dict(good,extra=1))
+        with self.assertRaises(ValueError):self.custom(preset='pomo50')
+        session=self.custom()
+        with self.assertRaises(RuntimeError):self.custom(timing=good)
+        with self.assertRaises(ValueError):
+            self.next(session,'update',task={'title':'x'},apps=[],timing=good)
+        self.assertEqual(study.read()['session']['timing'],{'focus':47,'short':7,'long':19,'every':2})
+
+    def test_legacy_preferences_migrate_to_plain_values(self):
+        self.assertEqual(bridge.timing_settings({'focus_mode':'pomo50'}),{'focus':50,'short':7,'long':30,'every':2})
+        self.assertEqual(bridge.timing_settings(),{'focus':50,'short':7,'long':20,'every':2})
+        self.assertEqual(bridge.cycle_text({'timing':{'focus':43,'short':6,'long':17,'every':3}}),
+                         '43 мин учёбы · 6 мин отдыха · 17 мин после 3 блоков')
+
 
 if __name__ == '__main__':
     unittest.main()

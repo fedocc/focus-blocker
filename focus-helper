@@ -552,7 +552,7 @@ def main():
         duration = int(sys.stdin.read(16))
     if args == ['stop']:
         request = json.loads(sys.stdin.read(4096))
-    if args in (['study-start'], ['study-break-start'], ['study-next-ready'], ['study-next-update'], ['study-next-start'], ['study-emergency-request'], ['study-emergency-confirm']):
+    if args in (['study-start'], ['study-break-start'], ['study-break-shorten'], ['study-next-ready'], ['study-next-update'], ['study-next-start'], ['study-emergency-request'], ['study-emergency-confirm']):
         request = json.loads(sys.stdin.read(32768))
     with locked():
         if args == ['study-status']:
@@ -562,6 +562,8 @@ def main():
             print(json.dumps(start_study(request), ensure_ascii=False))
         elif args == ['study-break-start']:
             print(json.dumps(study_lock.start_break(request, boot_identity()), ensure_ascii=False))
+        elif args == ['study-break-shorten']:
+            print(json.dumps(study_lock.shorten_break(request, boot_identity()), ensure_ascii=False))
         elif args in (['study-next-ready'], ['study-next-update'], ['study-next-start']):
             print(json.dumps(study_lock.next_block(request, boot_identity(), action=args[0].removeprefix('study-next-')), ensure_ascii=False))
         elif args == ['study-emergency-request']:
