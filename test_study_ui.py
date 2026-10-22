@@ -139,6 +139,22 @@ with tempfile.TemporaryDirectory() as folder:
     dock=ui.StudyDock();window._slovo_study_dock=dock
     window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea,dock)
     assert not hasattr(dock,'mode')
+    assert dock.timeline.model['timer_minutes']==269
+    from PyQt6.QtTest import QTest
+    window.resize(355,1000);window.show();dock.show();app.processEvents()
+    bar=dock.timeline.bar;bar.grab()
+    rect=next(rect for rect,node in bar.hits if node['id']=='rest:0')
+    QTest.mouseClick(bar,Qt.MouseButton.LeftButton,pos=rect.center().toPoint())
+    assert bar.selected=='rest:0' and '7 мин' in dock.timeline.title.text()
+    QTest.keyClick(bar,Qt.Key.Key_Right)
+    assert bar.selected=='return:0' and 'без лимита' in dock.timeline.title.text()
+    assert bar.width()<dock.width()
+    assert all(rect.right()<=bar.width() for rect,node in bar.hits)
+    dock.timeline.choose('rest-start:0')
+    assert 'решаешь ты' in dock.timeline.title.text()
+    dock.auto_next.setChecked(False)
+    assert dock.timeline.model['blocks']==1 and not dock.series_blocks.isEnabled()
+    dock.auto_next.setChecked(True)
     for key,value in {'focus':25,'short':5,'long':15,'every':1}.items():
         dock.timing_controls[key].setValue(value)
     dock.title.setText('Lecture')
@@ -150,6 +166,7 @@ with tempfile.TemporaryDirectory() as folder:
     with patch.object(ui.QMessageBox,'question',return_value=ui.QMessageBox.StandardButton.Yes):
         dock.start_block()
     assert study.read()['session']['timing']=={'focus':25,'short':5,'long':15,'every':1}
+    assert dock.timeline.model['active_id']=='focus:0'
     assert ui.json.loads(ui.PREFS.read_text())['timing']==dock.timing_values()
     dock.poll();assert all(not c.isEnabled() for c in dock.timing_controls.values()) and not dock.can_edit()
     assert dock.app_picker_button.isEnabled() and not dock.apps.isEnabled()
@@ -167,12 +184,14 @@ with tempfile.TemporaryDirectory() as folder:
     dock.state['auto_study_apps']=policy;dock.update_auto_apps()
     times[0]+=1500;times[1]+=1500;dock.poll()
     assert dock.phase_notice.event['kind']=='overtime'
+    assert dock.timeline.model['active_id']=='rest-start:0'
     assert dock.phase_notice.headline.text()=='25 МИНУТ ВЫПОЛНЕНЫ'
     dock.begin_rest();dock.poll()
     assert dock.state['session']['phase']=='break'
     assert dock.rest_screen.windows and all(w.isVisible() for w in dock.rest_screen.windows)
     w=dock.rest_screen.windows[0]
     assert w.back.isHidden() and w.clock.text()=='15:00' and not w.shorten.isHidden()
+    assert dock.timeline.model['active_id']=='rest:0'
     w.close();assert w.isVisible(),'closing cannot skip mandatory rest'
     w.grab().save('/tmp/focus-pomodoro-rest-preview.png')
     times[0]+=60;times[1]+=60;dock.poll()
@@ -180,9 +199,11 @@ with tempfile.TemporaryDirectory() as folder:
     assert dock.state['session']['remaining']==240 and w.shorten.isHidden() and w.isVisible()
     times[0]+=240;times[1]+=240;dock.poll()
     assert not w.back.isHidden() and dock.state['session']['phase']=='ready'
+    assert dock.timeline.model['active_id']=='return:0'
     w.back.click()
     assert dock.state['session']['phase']=='prepare' and dock.can_edit()
     assert dock.state['session']['remaining']==300
+    assert dock.timeline.model['active_id']=='prepare:1'
     assert not w.isVisible() and all(not c.isEnabled() for c in dock.timing_controls.values())
     assert dock.start.isEnabled() and 'Начать сейчас' in dock.start.text()
     task={'title':'Zoom lecture','occurrence_id':'zoom','url':ui.bridge.ORIGIN+'/?task=zoom'}

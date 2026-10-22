@@ -26,7 +26,7 @@ def timing_settings(value=None):
             return dict(value['timing'])
         if set(value) == {'focus', 'short', 'long', 'every'}:
             return dict(value)
-        preset = value.get('preset', value.get('focus_mode'))
+        preset = value.get('preset', value.get('focus_mode', 'deep80' if 'phase' in value else None))
     else:
         preset = value
     return dict(zip(('focus', 'short', 'long', 'every'), PRESETS.get(preset, (50, 7, 20, 2))))
@@ -35,6 +35,88 @@ def timing_settings(value=None):
 def cycle_text(value):
     t = timing_settings(value)
     return f'{t["focus"]} мин учёбы · {t["short"]} мин отдыха · {t["long"]} мин после {t["every"]} блоков'
+
+
+def series_plan(timing, blocks=4, auto=True, blackout=True, state=None):
+    """Read-only preview of the service's committed phases and manual gates."""
+    state = state or {}
+    session = state.get('session')
+    t = timing_settings(session or timing)
+    prepare = state.get('prepare_seconds', 120 if state else 300)
+    position, first_cycle = 0, 1
+    if session:
+        auto = session.get('auto_continue', False)
+        blackout = session.get('blackout', False)
+        blocks = session.get('blocks_total', 1) if auto else 1
+        position = blocks - session.get('blocks_left', blocks)
+        legacy_cycle = max(1,state.get('completed_today',0)+(session.get('phase')=='focus'))
+        first_cycle = session.get('cycle_index', legacy_cycle) - position
+    elif not auto:
+        # Single-block mode continues the daily rest cadence for this timing.
+        moscow = dt.timezone(dt.timedelta(hours=3))
+        day = dt.datetime.fromtimestamp(state.get('now', time.time()), moscow).date()
+        first_cycle += sum(item.get('outcome') == 'completed' and
+                           dt.datetime.fromtimestamp(item['ended_at'], moscow).date() == day and
+                           item.get('timing') == t for item in state.get('history', []))
+    blocks = max(1, min(24, int(blocks))) if auto else 1
+    nodes = []
+
+    def add(key, kind, title, detail, minutes=0, active=False, **extra):
+        nodes.append(dict(id=key, kind=kind, title=title, detail=detail,
+                          minutes=minutes, active=active, **extra))
+
+    add('start', 'manual', 'Старт — по кнопке',
+        'Ты выбираешь задачи и приложения и подтверждаешь начало серии. До старта время свободное.')
+    phase = (session or {}).get('phase')
+    for i in range(blocks):
+        current = bool(session and position == i)
+        long_rest = (first_cycle + i) % t['every'] == 0
+        rest = t['long'] if long_rest else t['short']
+        shortened = bool(current and phase == 'break' and session.get('break_shortened'))
+        if shortened:
+            rest = t['short']
+        focus_active = current and phase == 'focus' and not session.get('awaiting_rest')
+        add(f'focus:{i}', 'focus', f'Бот {i+1} · {t["focus"]} мин',
+            f'Приложение отсчитывает минимум {t["focus"]} мин. Задачи и разрешения зафиксированы. '
+            'После сигнала можно продолжать: дополнительное время учитывается до кнопки «Начать отдых».',
+            t['focus'], focus_active, block=i+1)
+        add(f'rest-start:{i}', 'manual', 'Начать отдых — решаешь ты',
+            'Автоматического ухода на отдых нет. После минимума бот продолжается с ограничениями, '
+            'пока ты не нажмёшь «Начать отдых». Эта пауза не ограничена по времени.',
+            active=bool(current and phase == 'focus' and session.get('awaiting_rest')))
+        rest_kind = 'Сокращённый отдых' if shortened else 'Длинный отдых' if long_rest else 'Короткий отдых'
+        detail = (f'Приложение отсчитывает {rest} мин. ' +
+                  ('Чёрный экран и возврат в Anki включены. ' if blackout else
+                   'Чёрный экран выключен: приложения доступны, обычная блокировка сайтов остаётся. '))
+        if long_rest and not shortened and t['long'] > t['short']:
+            detail += f'Можно сократить до {t["short"]} мин; уже прошедший отдых учитывается. '
+        if shortened:
+            detail += 'Уже прошедшее время зачтено; новый перерыв с нуля не запускается. '
+        add(f'rest:{i}', 'rest', f'{rest_kind} · {rest} мин', detail,
+            rest, current and phase == 'break', block=i+1, long=long_rest, shortened=shortened, protected=blackout)
+        if i < blocks - 1:
+            add(f'return:{i}', 'manual', 'Возвращение — без лимита времени',
+                'После таймера отдых ждёт кнопки «Я вернулся». Следующий бот сам не начинается. ' +
+                ('Чёрный экран остаётся до подтверждения.' if blackout else 'Чёрный экран выключен.'),
+                active=bool(session and phase == 'ready' and position == i+1))
+            add(f'prepare:{i+1}', 'prepare', f'Выбор задач · {prepare // 60} мин',
+                f'На задачи и приложения — до {prepare // 60} мин. Можно нажать «Начать сейчас». '
+                'Если ничего не менять, приложение само запустит следующий бот с прежним выбором. '
+                'Это подготовка с ограничениями приложений, а не свободное экранное время.',
+                prepare / 60, bool(session and phase == 'prepare' and position == i+1))
+            add(f'auto:{i+1}', 'automatic', 'Следующий бот — автоматически',
+                'По окончании подготовки приложение начинает следующий блок. Повторное подтверждение не продлевает выбор.')
+        else:
+            add('end', 'automatic', 'Конец серии — свободное время',
+                'После последнего отдыха серия заканчивается автоматически. Чёрный экран и ограничения серии снимаются; '
+                'обычные правила блокировщика сайтов сохраняются. Новая серия сама не запускается.')
+    active = next((node for node in nodes if node['active']), None)
+    if active and active['kind'] in ('focus', 'rest', 'prepare'):
+        seconds = active['minutes'] * 60
+        active['progress'] = min(1, max(0, 1 - remaining_seconds(state) / max(1, seconds)))
+    return dict(nodes=nodes, blocks=blocks, focus_minutes=t['focus'] * blocks,
+                timer_minutes=sum(node['minutes'] for node in nodes),
+                active_id=active['id'] if active else None, committed=bool(session), blackout=blackout)
 
 
 class PhaseAlerts:

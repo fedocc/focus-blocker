@@ -9,7 +9,8 @@ from aqt import mw, gui_hooks
 from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDialog, QDialog, QFrame,
                     QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QProgressBar,
                     QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl, QAbstractItemView,
-                    QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy, QSize, QRect, QApplication, QCheckBox, QSpinBox)
+                    QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy, QSize, QRect, QApplication, QCheckBox, QSpinBox,
+                    QPainter, QColor, QPen, QFont, QRectF)
 from . import bridge, analytics, activity_detail
 
 PREFS = Path(__file__).parent / 'user_files/preferences.json'
@@ -405,6 +406,133 @@ class TaskList(QListWidget):
             item.setSizeHint(QSize(0, max(32, text.height() + 16)))
 
 
+class TimelineBar(QWidget):
+    COLORS = {'focus':'#df747b', 'rest':'#64a6e4', 'prepare':'#d6b77c'}
+
+    def __init__(self, select, parent):
+        super().__init__(parent)
+        self.select = select
+        self.nodes, self.hits, self.selected = [], [], None
+        self.setFixedHeight(82)
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName('Шкала серии: бот, отдых и переходы')
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setFont(QFont('SF Pro Text', 9))
+        available = max(1, self.width() - 16)
+        total = max(1, sum(n['minutes'] for n in self.nodes))
+        count = max(1,sum(bool(n['minutes']) for n in self.nodes))
+        minimum = min(22,available/count*.7)
+        flexible = max(0,available-minimum*count)
+        x, self.hits = 8, []
+        for node in self.nodes:
+            if node['minutes']:
+                # A schematic, rather than a time axis: keep short rests and
+                # their manual gates readable alongside long study blocks.
+                width = minimum + flexible * node['minutes'] / total
+                rect = QRectF(x + .6, 24, max(.8, width - 1.2), 26)
+                color = QColor(self.COLORS[node['kind']])
+                painter.setPen(Qt.PenStyle.NoPen)
+                if node['kind']=='rest' and not node.get('protected'):
+                    color.setAlpha(85)
+                    painter.setPen(QPen(QColor(self.COLORS['rest']),1,Qt.PenStyle.DashLine))
+                painter.setBrush(color)
+                painter.drawRoundedRect(rect, 3, 3)
+                if width >= 16:
+                    painter.setPen(QColor('#d2e5f1' if node['kind']=='rest' and not node.get('protected') else '#132631'))
+                    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, str(round(node['minutes'])))
+                if node['kind'] == 'focus' and width >= 18:
+                    painter.setPen(QColor('#9cb2bc'))
+                    painter.drawText(QRectF(x, 2, width, 18), Qt.AlignmentFlag.AlignCenter, str(node['block']))
+                if node.get('active'):
+                    painter.setPen(QPen(QColor('#f5e8c9'), 2))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRoundedRect(rect.adjusted(-1,-2,1,2), 4, 4)
+                    progress = node.get('progress', 0)
+                    painter.drawLine(int(x), 55, int(x + width * progress), 55)
+                if node['id'] == self.selected:
+                    painter.setPen(QPen(QColor('#edf3f5'), 1))
+                    painter.setBrush(Qt.BrushStyle.NoBrush)
+                    painter.drawRoundedRect(rect.adjusted(-1,-2,1,2), 4, 4)
+                self.hits.append((QRectF(x,20,max(2,width),38),node))
+                x += width
+            else:
+                painter.setPen(QPen(QColor('#91a7b0'), 1))
+                painter.drawLine(int(x),51,int(x),63)
+                painter.setBrush(QColor('#d6b77c') if node['kind']=='automatic' else QColor('#132b37'))
+                painter.setPen(QPen(QColor('#f5e8c9') if node.get('active') or node['id']==self.selected else QColor('#91a7b0'),2))
+                if node['kind']=='automatic':
+                    painter.save();painter.translate(x,69);painter.rotate(45)
+                    painter.drawRect(QRectF(-2.5,-2.5,5,5));painter.restore()
+                else:
+                    painter.drawEllipse(QRectF(x-3.5,65.5,7,7))
+                self.hits.append((QRectF(x-6,59,12,22),node))
+        painter.end()
+
+    def mouseMoveEvent(self, event):
+        node = next((n for rect,n in reversed(self.hits) if rect.contains(event.position())),None)
+        self.setToolTip(node['title'] + '\n' + node['detail'] if node else 'Нажми на участок или переход, чтобы посмотреть правила.')
+
+    def mousePressEvent(self, event):
+        if event.button()==Qt.MouseButton.LeftButton:
+            node=next((n for rect,n in reversed(self.hits) if rect.contains(event.position())),None)
+            if node:self.select(node['id'])
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Left,Qt.Key.Key_Right) and self.nodes:
+            index=next((i for i,n in enumerate(self.nodes) if n['id']==self.selected),0)
+            self.select(self.nodes[(index+(1 if event.key()==Qt.Key.Key_Right else -1))%len(self.nodes)]['id'])
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+
+class SeriesTimeline(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.setObjectName('focusCard')
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
+        layout=QVBoxLayout(self);layout.setContentsMargins(14,12,14,12);layout.setSpacing(4)
+        layout.addWidget(label('План серии · нажми на участок', 'sectionTitle'))
+        self.total=label('');layout.addWidget(self.total)
+        self.bar=TimelineBar(self.choose,self);layout.addWidget(self.bar)
+        legend=QLabel('<span style="color:#df747b">■ Бот</span> &nbsp; <span style="color:#64a6e4">■ Отдых</span> &nbsp; <span style="color:#d6b77c">■ Выбор</span><br>○ По кнопке, без лимита &nbsp; ◆ Автоматически')
+        legend.setStyleSheet('font-size:10px;color:#98b0bc;');legend.setWordWrap(True);layout.addWidget(legend)
+        self.title=label('', 'taskHeading');layout.addWidget(self.title)
+        self.detail=label('');self.detail.setMinimumHeight(66);layout.addWidget(self.detail)
+        self.policy=label('');layout.addWidget(self.policy)
+        self.model=None
+
+    def set_plan(self, model):
+        previous=self.model or {};self.model=model
+        ids={n['id'] for n in model['nodes']}
+        if self.bar.selected not in ids or model['active_id']!=previous.get('active_id'):
+            self.bar.selected=model['active_id'] or 'focus:0'
+        self.bar.nodes=model['nodes']
+        minutes=round(model['timer_minutes'])
+        self.total.setText(f'{model["blocks"]} бл. · бот {model["focus_minutes"]} мин · по таймерам {minutes//60} ч {minutes%60:02} мин')
+        self.total.setToolTip('План без дополнительного бота и ожиданий по кнопке. Подготовку можно закончить раньше. Ширина участков условная, длительности подписаны в минутах.')
+        self.policy.setText(('Отдых защищён чёрным экраном.' if model['blackout'] else 'Пунктирный отдых — без чёрного экрана.') + '\nПосле серии — свободное время.')
+        self.bar.setAccessibleDescription(' → '.join(n['title'] for n in model['nodes']))
+        self.choose(self.bar.selected)
+
+    def choose(self, identity):
+        if not self.model:return
+        node=next((n for n in self.model['nodes'] if n['id']==identity),None)
+        if not node:return
+        self.bar.selected=identity
+        self.title.setText(('Сейчас: ' if node.get('active') else '') + node['title'])
+        self.detail.setText(node['detail'])
+        self.bar.update()
+
+
 class RestWindow(QDialog):
     """A black, non-destructive cover. The service owns rest and app enforcement."""
     REST_HINT = 'Встань из-за стола. Пройдись, подыши, разомнись.\nПроведи этот перерыв без телефона и экрана.'
@@ -644,11 +772,14 @@ class StudyDock(QDockWidget):
         modes.addWidget(self.blackout)
         self.preparation_note = label('После отдыха — «Я вернулся», затем 5 минут на задачи. Без изменений продолжатся прежние. После последнего блока серия завершится.')
         modes.addWidget(self.preparation_note)
+        self.timeline = SeriesTimeline()
+        modes.addWidget(self.timeline)
         for control, signal in ([(control, control.valueChanged) for control in self.timing_controls.values()] +
                                 [(self.auto_next, self.auto_next.toggled), (self.series_blocks, self.series_blocks.valueChanged), (self.blackout, self.blackout.toggled)]):
             signal.connect(self.save_mode)
         self.cycle.setText(bridge.cycle_text(self.timing_values()))
         self.timer_label.setText(f'{self.timing_values()["focus"]:02}:00')
+        self.update_timeline()
         day_row = QHBoxLayout()
         day_row.addWidget(label('ТВОЙ ДЕНЬ', 'eyebrow'))
         self.day_count = label('0 за день', 'sectionTitle')
@@ -851,6 +982,7 @@ class StudyDock(QDockWidget):
             self.update_auto_apps()
             for control in (*self.timing_controls.values(), self.auto_next, self.series_blocks, self.blackout):
                 control.setEnabled(not session)
+            self.series_blocks.setEnabled(not session and self.auto_next.isChecked())
             self.shorten.setVisible(self.can_shorten_rest())
             self.shorten.setEnabled(not self.busy)
             self.update_start_enabled()
@@ -859,6 +991,7 @@ class StudyDock(QDockWidget):
             self.phase_tag.setText('ДОПОЛНИТЕЛЬНОЕ ВРЕМЯ' if overtime else {'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА', 'ready': 'ПЕРЕРЫВ ЗАВЕРШЁН', 'prepare': 'ВЫБОР СЛЕДУЮЩЕГО БЛОКА'}[phase])
             self.start.setText('Начать отдых   →' if overtime else {'idle': 'Начать серию   →', 'focus': 'Блок идёт · настройки закрыты', 'break': 'Сначала восстановись', 'ready': 'Я вернулся · выбрать задачи →', 'prepare': 'Начать сейчас →'}[phase])
             self.cycle.setText(bridge.cycle_text(session or self.timing_values()))
+            self.update_timeline()
             self.tick_display()
             count = value['completed_today']
             total = (session or {}).get('blocks_total', 0)
@@ -925,14 +1058,20 @@ class StudyDock(QDockWidget):
     def timing_values(self):
         return {key: control.value() for key, control in self.timing_controls.items()}
 
+    def update_timeline(self):
+        self.timeline.set_plan(bridge.series_plan(self.timing_values(),self.series_blocks.value(),
+            self.auto_next.isChecked(),self.blackout.isChecked(),self.state))
+
     def save_mode(self, *_):
         if (self.state or {}).get('session'):
             return
         self.preferences.pop('focus_mode', None)
         self.preferences.update(timing=self.timing_values(), auto_next=self.auto_next.isChecked(),
                                 series_blocks=self.series_blocks.value(), rest_blackout=self.blackout.isChecked())
+        self.series_blocks.setEnabled(self.auto_next.isChecked())
         bridge.save_preferences(PREFS, self.preferences)
         self.cycle.setText(bridge.cycle_text(self.timing_values()))
+        self.update_timeline()
         self.tick_display()
         update_home_widget()
 

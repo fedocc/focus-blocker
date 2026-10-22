@@ -288,6 +288,73 @@ class PomodoroTests(unittest.TestCase):
         self.assertEqual(bridge.cycle_text({'timing':{'focus':43,'short':6,'long':17,'every':3}}),
                          '43 мин учёбы · 6 мин отдыха · 17 мин после 3 блоков')
 
+    def test_series_preview_matches_timing_totals_manual_gates_and_final_free_time(self):
+        plan=bridge.series_plan({'focus':50,'short':7,'long':20,'every':2},blocks=4)
+        self.assertEqual([n['minutes'] for n in plan['nodes'] if n['kind']=='rest'],[7,20,7,20])
+        self.assertEqual(plan['focus_minutes'],200)
+        self.assertEqual(plan['timer_minutes'],269)
+        self.assertEqual(len([n for n in plan['nodes'] if n['kind']=='prepare']),3)
+        self.assertEqual(plan['nodes'][-1]['id'],'end')
+        self.assertEqual(plan['nodes'][-1]['kind'],'automatic')
+        self.assertIn('свободное',plan['nodes'][-1]['title'])
+        for i in range(4):
+            gate=next(n for n in plan['nodes'] if n['id']==f'rest-start:{i}')
+            self.assertEqual(gate['kind'],'manual')
+            self.assertEqual(gate['minutes'],0)
+        one=bridge.series_plan({'focus':50,'short':7,'long':20,'every':2},blocks=9,auto=False,blackout=False)
+        self.assertEqual(one['blocks'],1)
+        self.assertFalse(any(n['kind']=='prepare' for n in one['nodes']))
+        self.assertFalse(next(n for n in one['nodes'] if n['kind']=='rest')['protected'])
+
+    def test_series_preview_follows_committed_phase_overtime_shortening_and_ack(self):
+        session=self.custom(timing={'focus':50,'short':7,'long':20,'every':2})
+        def plan():
+            state=study.status(self.boot,self.now,self.mono)
+            before=copy.deepcopy(state)
+            with patch.object(bridge,'remaining_seconds',return_value=(state['session'] or {}).get('remaining',0)):
+                result=bridge.series_plan({'focus':1,'short':1,'long':1,'every':1},blocks=1,auto=False,state=state)
+            self.assertEqual(state,before)
+            self.assertEqual(result['focus_minutes'],200,'UI edits cannot replace committed timing')
+            return result
+        self.assertEqual(plan()['active_id'],'focus:0')
+        self.advance(3000)
+        self.assertEqual(plan()['active_id'],'rest-start:0')
+        self.rest(session)
+        self.assertEqual(plan()['active_id'],'rest:0')
+        state=self.advance(420)
+        self.assertEqual(plan()['active_id'],'return:0')
+        self.next(state['session'])
+        self.assertEqual(plan()['active_id'],'prepare:1')
+        session=self.advance(300)['session']
+        self.assertEqual(plan()['active_id'],'focus:1')
+        self.advance(3000);self.rest(session);self.advance(60);self.short(session)
+        model=plan()
+        rest=next(n for n in model['nodes'] if n['id']=='rest:1')
+        self.assertTrue(rest['shortened'])
+        self.assertEqual(rest['minutes'],7)
+        self.assertEqual(next(n for n in model['nodes'] if n['id']=='rest:3')['minutes'],20)
+
+    def test_single_custom_preview_uses_same_daily_cadence_as_the_service(self):
+        timing={'focus':11,'short':3,'long':8,'every':2}
+        session=self.custom(timing=timing,auto_continue=False)
+        self.advance(660);self.rest(session);self.advance(180)
+        state=study.status(self.boot,self.now,self.mono)
+        state['history'].append({'id':'legacy','preset':'pomo50','outcome':'completed','ended_at':self.now})
+        model=bridge.series_plan(timing,auto=False,state=state)
+        planned=next(n for n in model['nodes'] if n['kind']=='rest')['minutes']
+        self.assertEqual(planned,8)
+        session=self.custom(timing=timing,auto_continue=False)
+        self.advance(660)
+        self.assertEqual(self.rest(session)['remaining'],planned*60)
+
+    def test_timeline_keeps_legacy_80_minute_session_and_daily_long_rest(self):
+        for phase,completed in (('focus',1),('break',2)):
+            state={'session':{'phase':phase,'remaining':100,'apps':[]},'completed_today':completed}
+            with patch.object(bridge,'remaining_seconds',return_value=100):
+                model=bridge.series_plan({'focus':1,'short':1,'long':1,'every':1},state=state)
+            self.assertEqual(model['focus_minutes'],80)
+            self.assertEqual(next(n for n in model['nodes'] if n['kind']=='rest')['minutes'],30)
+
 
 if __name__ == '__main__':
     unittest.main()
