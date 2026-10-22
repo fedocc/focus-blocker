@@ -6,6 +6,7 @@
  }
  if(window.slovoFocusStats?.grid===grid&&window.slovoFocusStats.alive()){window.slovoFocusStats.update(PAYLOAD);return;}
  document.getElementById('slovo-stats-switch')?.remove();
+ document.getElementById('slovo-review-health')?.remove();
  grid.querySelectorAll('.slovo-focus-replacement').forEach(el=>el.remove());
  const model={data:PAYLOAD,mode:PAYLOAD.mode||'focus',period:'today',view:'year',tab:'apps',selected:null,expanded:new Set(),detailScroll:{}};
  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -22,6 +23,25 @@
  const bar=document.createElement('div');bar.id='slovo-stats-switch';
  bar.innerHTML='<div class="ss-segments" role="group" aria-label="Режим статистики"><button data-mode="cards">Карточки</button><button data-mode="focus">◉ Фокус</button></div><span class="ss-caption"></span><div class="ss-segments ss-period" role="group" aria-label="Период статистики"><button data-period="today">Сегодня</button><button data-period="week">7 дней</button><button data-period="month">30 дней</button><button data-period="year">Год</button></div>';
  grid.before(bar);
+ const health=document.createElement('section');health.id='slovo-review-health';health.className='ss-review-health';health.setAttribute('aria-label','Качество повторения');bar.after(health);
+ function renderReviewHealth(){
+  health.hidden=model.mode!=='cards';
+  if(health.hidden)return;
+  const h=model.data.review_health||{loading:true};
+  if(h.loading){health.innerHTML='<div class="ss-muted">Проверяем повторения…</div>';return;}
+  if(h.error){health.innerHTML='<div class="ss-muted">Не удалось получить статистику: '+esc(h.error)+'</div>';return;}
+  const retention=h.retention===null?'—':Number(h.retention).toLocaleString('ru-RU')+'%';
+  health.innerHTML=`<div class="ss-panel-head"><span class="ss-panel-title">Качество повторения</span><span class="ss-pill">${h.fsrs?'FSRS включён':'FSRS выключен'}</span></div>
+   <div class="ss-review-tiles">
+    <div><strong>${esc(h.overdue)}</strong><span>Просрочено</span><small>${esc(h.review_due)} доступных повторений на сегодня, включая просроченные</small></div>
+    <div><strong>${retention}</strong><span>Удержание · 30 дней</span><small>${h.review_answers?esc(h.recalled)+' из '+esc(h.review_answers)+' ответов; повторения всей коллекции':'Пока нет ответов на запланированных повторениях'}</small></div>
+    <div><strong>${esc(h.repair_count)}</strong><span>Карточки на переработку</span><small>Пиявки и тег slovo::repair · старый архив исключён</small></div>
+   </div>
+   <div class="ss-review-footer"><span class="ss-muted">Забыл — Again. Вспомнил с трудом — Hard. Проблемную карточку лучше переформулировать.</span><button type="button" class="ss-repair-open">На переработку ↗</button></div>
+   ${h.setup_error?'<div class="ss-review-error">Настройки не применены: '+esc(h.setup_error)+'</div>':''}`;
+  health.querySelector('.ss-repair-open').onclick=()=>pycmd('slovo:review-repair');
+ }
+
  const metrics=['studied','time','pace','retention'].map(id=>replacement(grid.querySelector('.onigiri-stat-card[data-stat="'+id+'"]'),'ss-metric'));
  const activity=replacement(grid.querySelector('#onigiri-heatmap-container'),'ss-native-activity');
  if(activity)activity.id='slovo-focus-heatmap';
@@ -188,6 +208,7 @@
  }
  function render(){
   document.documentElement.dataset.slovoMode=model.mode;
+  renderReviewHealth();
   bar.querySelectorAll('[data-mode]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===model.mode)));
   bar.querySelector('.ss-period').style.display=model.mode==='focus'?'':'none';
   bar.querySelector('.ss-caption').textContent=model.mode==='focus'?'Вся учёба · блоки, часы и приложения':'Повторения карточек Anki';
@@ -196,6 +217,6 @@
  }
  bar.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{model.mode=b.dataset.mode;render();pycmd('slovo:stats-mode:'+model.mode);});
  bar.querySelectorAll('[data-period]').forEach(b=>b.onclick=()=>{model.period=b.dataset.period;model.view={today:'week',week:'week',month:'month',year:'year'}[model.period];model.selected=null;render();});
- window.slovoFocusStats={grid,alive:()=>[...metrics,activity,details].filter(Boolean).every(el=>el.isConnected),update(data){model.data=data;const key=JSON.stringify([data.today,data.records.map(r=>[r.id,r.outcome]),Math.floor(data.records.reduce((s,r)=>s+duration(r),0)/15),Math.floor(Object.values(data.usage.days||{}).flatMap(d=>Object.values(d)).reduce((s,r)=>s+r.seconds,0)/15),data.tracking,data.detail_tracking,data.detail_status]);if(key!==this.key){this.key=key;render();}}};
+ window.slovoFocusStats={grid,alive:()=>health.isConnected&&[...metrics,activity,details].filter(Boolean).every(el=>el.isConnected),update(data){model.data=data;const key=JSON.stringify([data.review_health,data.today,data.records.map(r=>[r.id,r.outcome]),Math.floor(data.records.reduce((s,r)=>s+duration(r),0)/15),Math.floor(Object.values(data.usage.days||{}).flatMap(d=>Object.values(d)).reduce((s,r)=>s+r.seconds,0)/15),data.tracking,data.detail_tracking,data.detail_status]);if(key!==this.key){this.key=key;render();}}};
  render();
 })();

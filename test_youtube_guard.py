@@ -842,7 +842,12 @@ class RootIntegrationTests(unittest.TestCase):
         self.assertLess(abs(helper.lease_clock()-child['clock']),5)
         # The clock persisted by a fresh CLI is boot-relative, not a local
         # zero-based process clock. An older daemon must not expire it early.
-        self.assertGreater(child['clock']-child['local'],100)
+        if sys.platform == 'darwin':
+            self.assertGreater(child['clock']-child['local'],100)
+        else:
+            # Linux monotonic() is already boot-relative; only macOS Python
+            # needs the separate boot clock checked by the assertion above.
+            self.assertLess(abs(child['clock']-child['local']),1)
         helper.lease('telegram',420)
         with patch.object(helper.time,'monotonic',return_value=999999999):
             helper.expire()

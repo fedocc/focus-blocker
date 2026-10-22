@@ -23,7 +23,7 @@ PLIST = Path('/Library/LaunchDaemons/local.focus-open.timer.plist')
 RULE = Path('/private/etc/sudoers.d/focus-open')
 HOSTS = Path('/private/etc/hosts')
 ROOT_FILES = ('focus-helper', 'focus_youtube_guard.py', 'focus_service_policy.py', 'focus_playlist_sync.py', 'focus_study.py')
-ANKI_FILES = ('__init__.py', 'bridge.py', 'dashboard.py', 'analytics.py', 'activity_detail.py', 'focus-stats.js', 'focus-stats.css', 'manifest.json') + tuple(
+ANKI_FILES = ('__init__.py', 'bridge.py', 'dashboard.py', 'analytics.py', 'activity_detail.py', 'review_health.py', 'focus-stats.js', 'focus-stats.css', 'manifest.json') + tuple(
     f'wallpaper-{scene}.png' for scene in ('dawn', 'day', 'evening', 'night')) + tuple(
     f'wallpaper-{theme}-{scene}.png'
     for theme in ('skyline', 'sea', 'architecture', 'amg', 'rolls', 'goggins')

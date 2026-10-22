@@ -1,4 +1,4 @@
-"""Study dashboard: separate from Anki reviews and their scheduling."""
+"""Study dashboard with cached review health and one-time review defaults."""
 import json
 import time
 import sys
@@ -11,7 +11,7 @@ from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDial
                     QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl, QAbstractItemView,
                     QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy, QSize, QRect, QApplication, QCheckBox, QSpinBox,
                     QPainter, QColor, QPen, QFont, QRectF)
-from . import bridge, analytics, activity_detail
+from . import bridge, analytics, activity_detail, review_health
 
 PREFS = Path(__file__).parent / 'user_files/preferences.json'
 
@@ -1624,6 +1624,79 @@ def configure_activity_details():
     dialog.exec()
 
 
+class ReviewHealth:
+    """Collection work is serialized and cached, never run on timer repaint."""
+    def __init__(self):
+        self.data = {'loading': True}
+        self.pending = False
+        self.closed = False
+        self.last_at = 0
+        self.collection = mw.col
+
+    def refresh(self, setup=False):
+        if self.closed or self.pending or mw.col is not self.collection:
+            return
+        if not setup and time.monotonic() - self.last_at < 60:
+            return
+        from aqt.operations import QueryOp
+        self.pending = True
+        folder = PREFS.parent / 'review-backups'
+        setup_error = self.data.get('setup_error')
+        def work(col):
+            error = setup_error
+            if setup:
+                try:
+                    review_health.apply_once(col, folder)
+                except Exception as exc:
+                    error = str(exc)
+            data = review_health.snapshot(col)
+            if error:
+                data['setup_error'] = error
+            return data
+        def done(data):
+            self.pending = False
+            if self.closed or mw.col is not self.collection:
+                return
+            self.last_at = time.monotonic()
+            self.data = data
+            if setup:
+                mw.apply_collection_options()
+            update_home_widget()
+        def failed(error):
+            self.pending = False
+            if self.closed or mw.col is not self.collection:
+                return
+            self.last_at = time.monotonic()
+            self.data = {'loading': False, 'error': str(error)}
+            update_home_widget()
+        QueryOp(parent=mw, op=work, success=done).failure(failed).run_in_background()
+
+
+def open_review_queue():
+    if not mw.col:
+        return
+    from aqt import dialogs
+    browser = dialogs.open('Browser', mw)
+    browser.form.searchEdit.lineEdit().setText(review_health.repair_query(mw.col))
+    browser.onSearchActivated()
+
+
+def restore_review_settings():
+    from aqt.operations import QueryOp
+    from aqt.utils import showInfo
+    if not mw.col:
+        return
+    def done(_):
+        mw.apply_collection_options()
+        health = getattr(mw, '_slovo_review_health', None)
+        if health:
+            health.last_at = 0
+            health.refresh()
+        showInfo('Исходные настройки повторения восстановлены. Карточки и сроки не перенесены.')
+    QueryOp(parent=mw, op=lambda col: review_health.restore_settings(col, PREFS.parent / 'review-backups'),
+            success=done).with_progress('Возвращаем настройки повторения…').run_in_background()
+
+
 def loaded():
     mw.addonManager.setWebExports(__name__, r'(wallpaper-([a-z]+-)?(predawn|dawn|morning|day|golden|evening|night)\.png|focus-stats\.(js|css))')
     action = QAction('Учебные блоки · Слово', mw)
@@ -1647,6 +1720,16 @@ def loaded():
     mw.form.menuTools.addAction(restore)
     mw._slovo_restore_action = restore
     ensure_study()
+    for text, name, callback in (
+        ('Карточки на переработку…', '_slovo_repair_action', open_review_queue),
+        ('Вернуть прежние настройки повторения…', '_slovo_review_restore_action', restore_review_settings),
+    ):
+        extra = QAction(text, mw)
+        extra.triggered.connect(callback)
+        mw.form.menuTools.addAction(extra)
+        setattr(mw, name, extra)
+    mw._slovo_review_health = ReviewHealth()
+    mw._slovo_review_health.refresh(setup=True)
     if sys.platform == 'darwin':
         dock = mw._slovo_study_dock
         try:
@@ -1746,6 +1829,10 @@ gui_hooks.profile_did_open.append(loaded)
 
 
 def unloaded():
+    health = getattr(mw, '_slovo_review_health', None)
+    if health:
+        health.closed = True
+        mw._slovo_review_health = None
     dock = getattr(mw, '_slovo_study_dock', None)
     if dock:
         dock.closed = True
@@ -1770,7 +1857,7 @@ def unloaded():
         mw.form.menuTools.removeAction(action)
         action.deleteLater()
         mw._slovo_study_action = None
-    for name in ('_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action', '_slovo_tracking_action', '_slovo_details_action', '_slovo_wallpaper_action', '_slovo_signal_action'):
+    for name in ('_slovo_repair_action', '_slovo_review_restore_action', '_slovo_archive_action', '_slovo_restore_action', '_slovo_menu_timer_action', '_slovo_tracking_action', '_slovo_details_action', '_slovo_wallpaper_action', '_slovo_signal_action'):
         extra = getattr(mw, name, None)
         if extra:
             mw.form.menuTools.removeAction(extra)
@@ -2009,6 +2096,10 @@ def update_home_widget(*_):
     if dock and dock.usage_tracker:
         stats_state['history'] = list(dock.usage_tracker.blocks.values()) + (state or {}).get('history', [])
     stats = analytics.snapshot(stats_state, usage, remaining=bridge.remaining_seconds(state), overtime=bridge.overtime_seconds(state))
+    health = getattr(mw, '_slovo_review_health', None)
+    if health:
+        health.refresh()
+    stats['review_health'] = health.data if health else {'loading': True}
     stats['mode'] = dock.preferences.get('stats_mode', 'focus') if dock else 'focus'
     stats['tracking'] = bool(dock and dock.usage_tracker and dock.preferences.get('track_apps', True) and not getattr(dock, 'usage_error', None))
     stats['detail_tracking'] = bool(dock and dock.detail_reader and dock.preferences.get('track_details', True))
@@ -2021,6 +2112,9 @@ def update_home_widget(*_):
 def home_message(handled, message, context):
     if handled[0] or context is not mw.deckBrowser:
         return handled
+    if message == 'slovo:review-repair':
+        open_review_queue()
+        return True, None
     if message == 'slovo:rest':
         ensure_study().begin_rest()
         return True, None
