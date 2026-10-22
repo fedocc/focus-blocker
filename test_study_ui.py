@@ -10,6 +10,101 @@ import unittest
 
 class StudyUiTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec('aqt'), 'Anki Qt is unavailable in this Python')
+    def test_mac_rest_panels_cover_all_screens_without_menu_timer_and_suspend_cleanly(self):
+        program = r'''
+import ctypes
+from types import SimpleNamespace
+from unittest.mock import patch
+from aqt.qt import QApplication,Qt,QRect
+from anki_study import dashboard as ui
+app=QApplication([])
+ui.bridge.remaining_seconds=lambda *_:120
+ui.bridge.play_alert_sound=lambda *_:None
+state={'session':{'id':'rest','phase':'break','blackout':True,'remaining':120}}
+dock=SimpleNamespace(state=state,busy=False,can_shorten_rest=lambda:False,shorten_rest=lambda:None,prepare_next=lambda:None,request_emergency=lambda:None)
+screen=ui.RestScreen(dock)
+assert screen.native is None,'offscreen winId is never sent to Objective-C'
+class Native:
+    def __init__(self):self.calls=[];self.activations=0;self.fail=False
+    def cover(self,window,order=True):
+        if self.fail:raise RuntimeError('test failure')
+        self.calls.append((window,order))
+    def activate(self):self.activations+=1
+native=Native();screen.native=native
+geometries=[QRect(0,0,800,600),QRect(800,0,1024,768)]
+screens=[SimpleNamespace(geometry=lambda g=g:g) for g in geometries]
+with patch.object(ui.QApplication,'screens',return_value=screens),patch.object(ui.QApplication,'applicationState',return_value=Qt.ApplicationState.ApplicationInactive):
+    screen.update()
+    assert len(screen.windows)==2 and len(native.calls)==4
+    for window,geometry in zip(screen.windows,geometries):
+        assert window.parent() is None and window.geometry()==geometry
+        assert window.testAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
+        assert not window.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        assert not window.testAttribute(Qt.WidgetAttribute.WA_QuitOnClose)
+        assert window.isVisible()
+    assert native.activations==1 and not hasattr(dock,'menu_timer')
+    native.calls.clear();screen.update()
+    assert len(native.calls)==2,'Space/app switch reasserts every existing native cover'
+    screen.suspended=True;native.calls.clear();screen.update()
+    assert not native.calls and all(not w.isVisible() for w in screen.windows)
+    screen.suspended=False;screen.update()
+    assert all(w.isVisible() for w in screen.windows)
+    native.fail=True;screen.update()
+    assert all('Не удалось' in w.hint.text() for w in screen.windows)
+    native.fail=False;screen.update()
+    assert all(w.hint.text()==ui.RestWindow.REST_HINT for w in screen.windows)
+    state['session']['phase']='prepare';native.calls.clear();screen.update()
+    assert not native.calls and all(not w.isVisible() for w in screen.windows)
+    state['session']['phase']='ready';screen.update()
+    assert all(w.isVisible() and not w.back.isHidden() for w in screen.windows)
+    screen.dispose();assert not screen.windows
+
+# Validate native handle routing and ABI without touching real windows/Spaces.
+with patch.object(ui.MacNative,'__init__',lambda self:setattr(self,'c',ctypes)),patch('platform.mac_ver',return_value=('26.6.2',(),'')):
+    overlay=ui.MacRestOverlay()
+calls=[]
+def send(receiver,selector,args=(),types=(),result='pointer'):
+    calls.append((receiver,selector,args,types,result))
+    return 200 if selector=='window' else None
+overlay.send=send
+overlay.cover(SimpleNamespace(winId=lambda:100))
+assert calls[0][:2]==(100,'window')
+assert all(call[0]==200 for call in calls[1:]),'NSWindow selectors must not target NSView'
+lookup={selector:(args,types,result) for _,selector,args,types,result in calls[1:]}
+behavior=lookup['setCollectionBehavior:'][0][0]
+assert behavior & (1<<0) and behavior & (1<<8) and behavior & (1<<18)
+assert behavior & (1<<4) and not behavior & ((1<<1)|(1<<2)|(1<<3)|(1<<7)|(1<<9)|(1<<16)|(1<<17))
+assert lookup['setCollectionBehavior:'][1]==[ctypes.c_ulong]
+assert lookup['setLevel:']==([1000],[ctypes.c_long],None)
+for key in ('setHidesOnDeactivate:','setCanHide:','setIgnoresMouseEvents:'):
+    assert lookup[key]==([False],[ctypes.c_bool],None)
+assert calls[-1][1]=='orderFrontRegardless'
+calls.clear();overlay.cover(SimpleNamespace(winId=lambda:100),order=False)
+assert not any(c[1]=='orderFrontRegardless' for c in calls)
+overlay.send=lambda *_args,**_kwargs:None
+try:overlay.cover(SimpleNamespace(winId=lambda:100));raise AssertionError('missing native window must be reported')
+except RuntimeError:pass
+# Confirm every native selector exists in the installed AppKit runtime without
+# creating/showing a native window or changing another application's state.
+import sys
+if sys.platform=='darwin':
+    ctypes.CDLL('/System/Library/Frameworks/AppKit.framework/AppKit')
+    runtime=ui.MacNative()
+    method=runtime.objc.class_getInstanceMethod
+    method.argtypes=[ctypes.c_void_p,ctypes.c_void_p];method.restype=ctypes.c_void_p
+    for name,selectors in {'NSView':['window'], 'NSWindow':['setCollectionBehavior:','setHidesOnDeactivate:','setCanHide:','setIgnoresMouseEvents:','setAnimationBehavior:','setLevel:','orderFrontRegardless']}.items():
+        cls=runtime.objc.objc_getClass(name.encode())
+        assert cls
+        for selector in selectors:
+            assert method(cls,runtime.objc.sel_registerName(selector.encode())),selector
+print('Rest panels and native ABI: passed')
+'''
+        result = subprocess.run([sys.executable, '-c', program], cwd=Path(__file__).parent,
+                                env=dict(os.environ, QT_QPA_PLATFORM='offscreen'),
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(importlib.util.find_spec('aqt'), 'Anki Qt is unavailable in this Python')
     def test_pomodoro_ui_rest_cover_preparation_autostart_and_quick_exit(self):
         program = r'''
 import tempfile

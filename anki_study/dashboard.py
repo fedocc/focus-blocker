@@ -92,13 +92,9 @@ class Notice(QLabel):
         self.setVisible(bool(text))
 
 
-class MenuTimer:
-    """Text-only macOS status item; display preferences never control a block.
-
-    All AppKit calls run on Qt's main thread. Each objc_msgSend signature has
-    its own callable, so setting argument types cannot race another bridge.
-    """
-    def __init__(self, dock):
+class MacNative:
+    """Typed Objective-C calls on Qt's main thread; no cross-call ABI mutation."""
+    def __init__(self):
         import ctypes as c
         self.c = c
         self.objc = c.CDLL('/usr/lib/libobjc.A.dylib')
@@ -107,6 +103,52 @@ class MenuTimer:
         self.objc.sel_registerName.argtypes = [c.c_char_p]
         self.objc.sel_registerName.restype = c.c_void_p
         self.address = c.cast(self.objc.objc_msgSend, c.c_void_p).value
+
+    def send(self, receiver, selector, args=(), types=(), result='pointer'):
+        c = self.c
+        output = c.c_void_p if result == 'pointer' else result
+        call = c.CFUNCTYPE(output, c.c_void_p, c.c_void_p, *types)(self.address)
+        return call(receiver, self.objc.sel_registerName(selector.encode()), *args)
+
+
+class MacRestOverlay(MacNative):
+    """Keep independent NSPanel covers in every desktop/fullscreen app's Space."""
+    def __init__(self):
+        super().__init__()
+        import platform
+        # NSWindow.h: CanJoinAllSpaces, Stationary, IgnoresCycle,
+        # FullScreenAuxiliary; no conflicting MoveToActiveSpace/Primary flags.
+        self.behavior = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8)
+        if int(platform.mac_ver()[0].split('.')[0] or 0) >= 13:
+            self.behavior |= 1 << 18  # CanJoinAllApplications (Stage Manager).
+
+    def cover(self, widget, order=True):
+        # Cocoa QWidget.winId() is an NSView*, NOT an NSWindow*.
+        window = self.send(int(widget.winId()), 'window')
+        if not window:
+            raise RuntimeError('macOS не предоставила окно заставки.')
+        c = self.c
+        self.send(window, 'setCollectionBehavior:', [self.behavior], [c.c_ulong], None)
+        self.send(window, 'setHidesOnDeactivate:', [False], [c.c_bool], None)
+        self.send(window, 'setCanHide:', [False], [c.c_bool], None)
+        self.send(window, 'setIgnoresMouseEvents:', [False], [c.c_bool], None)
+        self.send(window, 'setAnimationBehavior:', [2], [c.c_long], None)
+        # NSScreenSaverWindowLevel from the public macOS SDK. Applies only to
+        # our covers; suspension/hide still works for emergency/auth dialogs.
+        self.send(window, 'setLevel:', [1000], [c.c_long], None)
+        if order:
+            self.send(window, 'orderFrontRegardless', result=None)
+
+    def activate(self):
+        application = self.send(self.objc.objc_getClass(b'NSApplication'), 'sharedApplication')
+        self.send(application, 'activateIgnoringOtherApps:', [True], [self.c.c_bool], None)
+
+
+class MenuTimer(MacNative):
+    """Text-only macOS status item; display preferences never control a block."""
+    def __init__(self, dock):
+        super().__init__()
+        c = self.c
         self.dock = dock
         self.bar = self.send(self.objc.objc_getClass(b'NSStatusBar'), 'systemStatusBar')
         self.item = self.send(self.bar, 'statusItemWithLength:', [-1.0], [c.c_double])
@@ -121,12 +163,6 @@ class MenuTimer:
         self.timer.start(1000)
         self.seen_at = time.monotonic()
         self.tick()
-
-    def send(self, receiver, selector, args=(), types=(), result='pointer'):
-        c = self.c
-        output = c.c_void_p if result == 'pointer' else result
-        call = c.CFUNCTYPE(output, c.c_void_p, c.c_void_p, *types)(self.address)
-        return call(receiver, self.objc.sel_registerName(selector.encode()), *args)
 
     def string(self, text):
         return self.send(self.objc.objc_getClass(b'NSString'), 'stringWithUTF8String:', [text.encode()], [self.c.c_char_p])
@@ -371,8 +407,13 @@ class TaskList(QListWidget):
 
 class RestWindow(QDialog):
     """A black, non-destructive cover. The service owns rest and app enforcement."""
+    REST_HINT = 'Встань из-за стола. Пройдись, подыши, разомнись.\nПроведи этот перерыв без телефона и экрана.'
     def __init__(self, dock, screen):
-        super().__init__(mw, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        # A transient child of Anki follows its parent's Space. Each cover must
+        # instead be an independent panel, owned and disposed by RestScreen.
+        super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
         self.dock = dock
         self.setWindowTitle('Отдых · Фокус')
         self.setStyleSheet('QDialog {background:#050608;color:#c9d4d6;} QLabel {color:#c9d4d6;background:transparent;} QPushButton {padding:14px;background:#15282c;color:#dfc18c;border:1px solid #354b4e;border-radius:10px;}')
@@ -387,7 +428,7 @@ class RestWindow(QDialog):
         self.clock.setStyleSheet('font-size:72px;color:#9cb3b7;')
         self.clock.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.clock)
-        self.hint = QLabel('Встань из-за стола. Пройдись, подыши, разомнись.\nПроведи этот перерыв без телефона и экрана.')
+        self.hint = QLabel(self.REST_HINT)
         self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
@@ -415,6 +456,26 @@ class RestScreen:
         self.windows = []
         self.suspended = False
         self.last_ready = None
+        self.native = None
+        self.native_error = None
+        # Offscreen/minimal Qt winIds are not Cocoa pointers, even on macOS.
+        if sys.platform == 'darwin' and QApplication.platformName() == 'cocoa':
+            try:
+                self.native = MacRestOverlay()
+            except Exception as error:
+                self.native_error = str(error)
+
+    def cover(self, window, order=True):
+        if self.native:
+            try:
+                self.native.cover(window, order=order)
+                self.native_error = None
+            except Exception as error:
+                self.native_error = str(error)
+        if self.native_error:
+            window.hint.setText('Не удалось перекрыть полноэкранные приложения macOS.\n' + self.native_error)
+        else:
+            window.hint.setText(RestWindow.REST_HINT)
 
     def update(self):
         session = ((self.dock.state or {}).get('session') or {})
@@ -440,19 +501,21 @@ class RestScreen:
             window.shorten.setEnabled(not self.dock.busy)
             window.heading.setText('ПЕРЕРЫВ ЗАВЕРШЁН' if ready else 'ДЛИННЫЙ ОТДЫХ' if session.get('break_kind') == 'long' else 'ОТДЫХ')
             if not window.isVisible():
+                self.cover(window, order=False)
                 window.show()
                 window.raise_()
                 window.activateWindow()
+            # Reassert after Qt maps/reorders its panel, and after switching
+            # Spaces. Works independently of the optional menu-bar timer.
+            self.cover(window)
         if QApplication.applicationState() != Qt.ApplicationState.ApplicationActive and self.windows:
             # Independent of slow browser scans in the system guard. AppKit
             # activates Anki itself; no Apple Events permission to another app.
             self.windows[0].raise_()
             self.windows[0].activateWindow()
-            native = getattr(self.dock, 'menu_timer', None)
-            if native:
+            if self.native:
                 try:
-                    application = native.send(native.objc.objc_getClass(b'NSApplication'), 'sharedApplication')
-                    native.send(application, 'activateIgnoringOtherApps:', [True], [native.c.c_bool], None)
+                    self.native.activate()
                 except Exception:
                     pass
         if ready and self.last_ready != session['id']:
