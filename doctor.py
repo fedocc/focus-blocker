@@ -14,7 +14,7 @@ def main():
     args = parser.parse_args()
     root = Path(__file__).resolve().parent
     errors = []
-    for name in ('install.py', 'wait_study_idle.py', 'focus-helper', 'focus_open.py', 'focus_youtube_guard.py',
+    for name in ('install.py', 'build_window_guard.py', 'wait_study_idle.py', 'focus-helper', 'focus_open.py', 'focus_youtube_guard.py',
                  'focus_service_policy.py', 'focus_playlist_sync.py', 'focus_study.py',
                  'anki_study/__init__.py', 'anki_study/bridge.py', 'anki_study/dashboard.py', 'anki_study/analytics.py', 'anki_study/activity_detail.py', 'anki_study/review_health.py'):
         try:

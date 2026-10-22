@@ -1,5 +1,9 @@
 """Root-owned YouTube policy and browser observer; no browser extension required."""
 import json
+import hashlib
+import stat
+import ctypes
+import socket
 import math
 import os
 import pwd
@@ -291,6 +295,78 @@ def user_script(script):
     return result.stdout
 
 
+
+# Only the dedicated native helper receives Accessibility permission. It reads
+# window IDs and close controls, never page text, credentials or browser DOM.
+def guard_arc_previews():
+    if not (BASE / 'arc-preview-guard-required').exists():
+        return
+    executable = Path('/Applications/Focus Window Guard.app/Contents/MacOS/FocusWindowGuard')
+    identity_path = BASE / 'arc-preview-guard-identity.json'
+    identity_info = identity_path.lstat()
+    executable_info = executable.lstat()
+    if (not stat.S_ISREG(identity_info.st_mode) or identity_info.st_uid != 0 or identity_info.st_mode & 0o022 or
+            not stat.S_ISREG(executable_info.st_mode) or executable_info.st_uid != 0 or executable_info.st_mode & 0o022):
+        raise RuntimeError('Focus Window Guard: нарушены права защищённого помощника')
+    identity = json.loads(identity_path.read_text())
+    if (not re.fullmatch(r'[a-f0-9]{40}', identity.get('cdhash', '')) or
+            hashlib.sha256(executable.read_bytes()).hexdigest() != identity.get('sha256')):
+        raise RuntimeError('Focus Window Guard: приложение изменено')
+    owner = username()
+    uid = pwd.getpwnam(owner).pw_uid
+    # LaunchServices gives the signed helper its own Accessibility identity.
+    # Authenticate responses using the kernel's Unix-socket peer PID and its
+    # root-owned executable path; writable /tmp health files could be forged.
+    with tempfile.TemporaryDirectory(prefix='focus-arc-', dir='/private/tmp') as directory:
+        os.chmod(directory, 0o711)
+        endpoint = str(Path(directory) / 'result.sock')
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(endpoint)
+            os.chmod(endpoint, 0o622)
+            server.listen(4)
+            deadline = time.monotonic() + SCRIPT_TIMEOUT
+            subprocess.run(['/bin/launchctl', 'asuser', str(uid), '/usr/bin/sudo', '-n', '-u', owner,
+                            '/usr/bin/open', '-g', '-n', str(executable.parents[2]), '--args', '--result-socket', endpoint],
+                           capture_output=True, text=True, timeout=SCRIPT_TIMEOUT, check=True)
+            library = ctypes.CDLL('/usr/lib/libproc.dylib')
+            library.proc_pidpath.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+            library.proc_pidpath.restype = ctypes.c_int
+            code_library = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+            code_library.csops.argtypes = (ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_size_t)
+            code_library.csops.restype = ctypes.c_int
+            while True:
+                server.settimeout(max(.01, deadline - time.monotonic()))
+                try:
+                    connection, _ = server.accept()
+                except socket.timeout:
+                    raise RuntimeError('Focus Window Guard не ответил; проверь Универсальный доступ') from None
+                with connection:
+                    peer_pid = connection.getsockopt(0, 2)  # SOL_LOCAL / LOCAL_PEERPID, from the kernel.
+                    path_buffer = ctypes.create_string_buffer(4096)
+                    length = library.proc_pidpath(peer_pid, path_buffer, len(path_buffer))
+                    code_hash = ctypes.create_string_buffer(20)
+                    signed_peer = code_library.csops(peer_pid, 5, code_hash, 20) == 0 and code_hash.raw.hex() == identity['cdhash']
+                    if not length or Path(os.fsdecode(path_buffer.value)) != executable or not signed_peer:
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError('Focus Window Guard: ответ не подтверждён')
+                        continue
+                    connection.settimeout(max(.01, deadline - time.monotonic()))
+                    connection.sendall(b'1')
+                    data = b''
+                    while b'\n' not in data and len(data) < 4096:
+                        chunk = connection.recv(4096 - len(data))
+                        if not chunk:
+                            break
+                        data += chunk
+                    break
+    try:
+        value = json.loads(data)
+    except ValueError:
+        raise RuntimeError('Не удалось проверить окна Little Arc') from None
+    if value.get('ok') is not True:
+        raise RuntimeError('Focus Window Guard: ' + str(value.get('error', 'проверка не пройдена')))
+
+
 def _browser_report(strict_unsupported=True, only_browser=None):
     running = browser_processes()
     if only_browser is not None:
@@ -307,6 +383,8 @@ def _browser_report(strict_unsupported=True, only_browser=None):
     for name in sorted(running):
         quoted = json.dumps(name)
         kind = BROWSERS[name][1]
+        if name == 'Arc':
+            guard_arc_previews()
         lines.extend([
             # Check outside `tell`: resolving a target inside a tell block can
             # launch a browser that exited after the process snapshot.

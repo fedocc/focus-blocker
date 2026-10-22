@@ -339,6 +339,9 @@ def lease_clock():
 
 def lease(service, seconds, youtube_scope=None):
     require_no_focus()
+    if (BASE / 'no-manual-overrides').exists():
+        if (service in SOCIAL_SERVICES and seconds != socials.DURATIONS[service]) or (youtube_scope and 'temporary_full_access' in youtube_scope):
+            raise RuntimeError('Ручные исключения запрещены владельцем. Действуют обычные дневные лимиты.')
     if service not in TEMPORARY_SERVICES or isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 21600:
         raise ValueError('Invalid lease')
     if service == 'youtube' and (not youtube_scope or youtube_scope.get('mode') != 'video'):
@@ -375,9 +378,25 @@ def lease(service, seconds, youtube_scope=None):
     return value
 
 
+
+def manual_override_forbidden(current):
+    # Machine-local, root-owned opt-in. Ordinary terminal grants retain the
+    # installed daily policy; ad hoc administrative exceptions are rejected.
+    if not (BASE / 'no-manual-overrides').exists() or not current:
+        return False
+    if any(k in current for k in ('origin', 'request_id', 'additional_services')):
+        return True
+    service = current.get('service')
+    if service in SOCIAL_SERVICES:
+        seconds = socials.DURATIONS[service]
+        return (abs(current.get('deadline', 0) - current.get('started_at', 0) - seconds) > .01 or
+                abs(current.get('deadline_monotonic', 0) - current.get('started_monotonic', 0) - seconds) > .01)
+    return 'temporary_full_access' in current.get('youtube_scope', {})
+
+
 def expire():
     current = read_lease()
-    if current and (time.time() >= current['deadline'] or
+    if current and (manual_override_forbidden(current) or time.time() >= current['deadline'] or
                     (current.get('timer_clock') == 'system_monotonic_v1' and
                      lease_clock() >= current.get('deadline_monotonic', float('inf')))):
         revoke_lease()
@@ -404,6 +423,9 @@ def remember_report(report, current):
 
 def guard_cycle():
     current = read_lease()
+    if manual_override_forbidden(current):
+        revoke_lease()
+        current = None
     focus = study_lock.read()['session']
     focusing = bool(focus and focus['phase'] in ('focus', 'prepare'))
     set_study_web(focusing)

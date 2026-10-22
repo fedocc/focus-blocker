@@ -252,7 +252,7 @@ class PreviewPolicyTests(unittest.TestCase):
     def test_observer_retains_only_preview_address_not_google_page_content(self):
         url='https://www.google.com/search#fpstate=ive&vld=vid:'+OTHER
         out='T'+chr(31)+'Arc'+chr(31)+'w'+chr(31)+'t'+chr(31)+url+'\nB'+chr(31)+'Arc'+chr(31)+'1\n'
-        with patch.object(guard,'browser_processes',return_value={'Arc'}),patch.object(guard,'user_script',return_value=out) as native:
+        with patch.object(guard, 'guard_arc_previews'), patch.object(guard,'browser_processes',return_value={'Arc'}),patch.object(guard,'user_script',return_value=out) as native:
             report=guard.browser_report()
         self.assertEqual(report[0]['tabs'][0]['url'],url)
         self.assertNotIn('javascript',native.call_args.args[0].lower())
@@ -337,7 +337,7 @@ class ObserverTests(unittest.TestCase):
 
     def test_observer_checks_running_before_entering_tell(self):
         output = 'B' + chr(31) + 'Arc' + chr(31) + '7\n'
-        with patch.object(guard, 'browser_processes', return_value={'Arc'}), patch.object(guard, 'user_script', return_value=output) as script:
+        with patch.object(guard, 'guard_arc_previews'), patch.object(guard, 'browser_processes', return_value={'Arc'}), patch.object(guard, 'user_script', return_value=output) as script:
             report = guard.browser_report()
         source = script.call_args.args[0]
         self.assertLess(source.index('if application "Arc" is running then'), source.index('tell application "Arc"'))
@@ -1150,3 +1150,59 @@ class ClientIntegrationTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class ArcPreviewGuardTests(unittest.TestCase):
+    def test_preview_guard_runs_before_arc_tab_observation(self):
+        calls = []
+        output = 'B' + chr(31) + 'Arc' + chr(31) + '0\n'
+        with patch.object(guard, 'browser_processes', return_value={'Arc'}), patch.object(guard, 'guard_arc_previews', side_effect=lambda: calls.append('preview')), patch.object(guard, 'user_script', side_effect=lambda script: calls.append('tabs') or output):
+            report = guard._browser_report()
+        self.assertEqual(report[0]['tabs'], [])
+        self.assertEqual(calls, ['preview', 'tabs'])
+
+    def test_permission_failure_cannot_report_healthy_arc(self):
+        with patch.object(guard, 'browser_processes', return_value={'Arc'}), patch.object(guard, 'guard_arc_previews', side_effect=RuntimeError('permission denied')), patch.object(guard, 'user_script') as tabs:
+            report = guard.browser_report(tolerate_errors=True)
+        self.assertIn('Arc', report.errors)
+        tabs.assert_not_called()
+
+    def test_other_browsers_do_not_require_arc_accessibility(self):
+        output = 'B' + chr(31) + 'Safari' + chr(31) + '0\n'
+        with patch.object(guard, 'browser_processes', return_value={'Safari'}), patch.object(guard, 'guard_arc_previews') as native, patch.object(guard, 'user_script', return_value=output):
+            guard._browser_report()
+        native.assert_not_called()
+
+    def test_native_guard_is_opt_in_for_installations_without_helper(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(guard, 'BASE', Path(directory)), patch.object(guard.subprocess, 'run') as run:
+            guard.guard_arc_previews()
+        run.assert_not_called()
+
+
+
+class ManualOverrideLockTests(unittest.TestCase):
+    def test_locked_machine_rejects_admin_durations_and_metadata(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(helper, 'BASE', Path(directory)):
+            (Path(directory) / 'no-manual-overrides').touch()
+            ordinary = {'service': 'telegram', 'started_at': 100, 'deadline': 520,
+                        'started_monotonic': 1000, 'deadline_monotonic': 1420}
+            self.assertFalse(helper.manual_override_forbidden(ordinary))
+            self.assertTrue(helper.manual_override_forbidden(dict(ordinary, deadline=1900)))
+            self.assertTrue(helper.manual_override_forbidden(dict(ordinary, deadline_monotonic=2800)))
+            for field, value in (('origin', 'explicit_user_exception'), ('request_id', 'admin'), ('additional_services', ['x'])):
+                self.assertTrue(helper.manual_override_forbidden(dict(ordinary, **{field:value})))
+            self.assertTrue(helper.manual_override_forbidden({'service':'youtube','youtube_scope':{'temporary_full_access':{}}}))
+            self.assertFalse(helper.manual_override_forbidden({'service':'youtube','youtube_scope':{'mode':'video','allowed_ids':[OTHER]}}))
+
+    def test_grant_rejects_exception_even_when_daily_validator_is_patched(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(helper, 'BASE', Path(directory)), patch.object(helper, 'require_no_focus'), patch.object(helper.socials, 'validate'), patch.object(helper, 'require_timer') as timer:
+            (Path(directory) / 'no-manual-overrides').touch()
+            with self.assertRaisesRegex(RuntimeError, 'Ручные исключения запрещены'):
+                helper.lease('telegram', 1800)
+            timer.assert_not_called()
+
+    def test_daemon_revokes_legacy_exception_without_waiting_for_deadline(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(helper, 'BASE', Path(directory)), patch.object(helper, 'read_lease', return_value={'service':'telegram','request_id':'old','deadline':time.time()+3600}), patch.object(helper, 'revoke_lease') as revoke:
+            (Path(directory) / 'no-manual-overrides').touch()
+            helper.expire()
+            revoke.assert_called_once()
