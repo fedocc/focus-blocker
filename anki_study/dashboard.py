@@ -122,6 +122,40 @@ class MacRestOverlay(MacNative):
         self.behavior = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8)
         if int(platform.mac_ver()[0].split('.')[0] or 0) >= 13:
             self.behavior |= 1 << 18  # CanJoinAllApplications (Stage Manager).
+        self.saved_policy = None
+        self.saved_presentation = None
+
+    def application(self):
+        return self.send(self.objc.objc_getClass(b'NSApplication'), 'sharedApplication')
+
+    def begin(self):
+        app, c = self.application(), self.c
+        # A regular foreground app cannot overlay another app's fullscreen
+        # Space, even with CanJoinAllSpaces + FullScreenAuxiliary. Temporarily
+        # become an accessory; restore the exact original policy on every exit.
+        # Apple DTS (macOS 26): developer.apple.com/forums/thread/826308
+        if self.saved_policy is None:
+            self.saved_policy = self.send(app, 'activationPolicy', result=c.c_long)
+            self.saved_presentation = self.send(app, 'presentationOptions', result=c.c_ulong)
+        if self.send(app, 'activationPolicy', result=c.c_long) != 1:
+            if not self.send(app, 'setActivationPolicy:', [1], [c.c_long], c.c_bool):
+                raise RuntimeError('macOS не разрешила режим заставки поверх Spaces.')
+        # HideDock, AutoHideMenuBar, DisableProcessSwitching, DisableHideApplication.
+        # Keep Force Quit / logout / system authorization available. These are
+        # process-local presentation options, never persistent system defaults.
+        options = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 8)
+        options |= self.saved_presentation & (1 << 10)  # Existing fullscreen.
+        if self.send(app, 'presentationOptions', result=c.c_ulong) != options:
+            self.send(app, 'setPresentationOptions:', [options], [c.c_ulong], None)
+
+    def end(self):
+        if self.saved_policy is None:
+            return
+        app, c = self.application(), self.c
+        self.send(app, 'setPresentationOptions:', [self.saved_presentation], [c.c_ulong], None)
+        if not self.send(app, 'setActivationPolicy:', [self.saved_policy], [c.c_long], c.c_bool):
+            raise RuntimeError('macOS не восстановила обычный режим Anki; повторяем восстановление.')
+        self.saved_policy = self.saved_presentation = None
 
     def cover(self, widget, order=True):
         # Cocoa QWidget.winId() is an NSView*, NOT an NSWindow*.
@@ -129,6 +163,12 @@ class MacRestOverlay(MacNative):
         if not window:
             raise RuntimeError('macOS не предоставила окно заставки.')
         c = self.c
+        # Qt.Tool supplies an NSPanel but not its nonactivating style. Set it
+        # before the first show, so ordering the cover doesn't move Spaces.
+        style = self.send(window, 'styleMask', result=c.c_ulong)
+        if not style & (1 << 7):
+            self.send(window, 'setStyleMask:', [style | (1 << 7)], [c.c_ulong], None)
+        self.send(window, 'setFloatingPanel:', [True], [c.c_bool], None)
         self.send(window, 'setCollectionBehavior:', [self.behavior], [c.c_ulong], None)
         self.send(window, 'setHidesOnDeactivate:', [False], [c.c_bool], None)
         self.send(window, 'setCanHide:', [False], [c.c_bool], None)
@@ -141,8 +181,7 @@ class MacRestOverlay(MacNative):
             self.send(window, 'orderFrontRegardless', result=None)
 
     def activate(self):
-        application = self.send(self.objc.objc_getClass(b'NSApplication'), 'sharedApplication')
-        self.send(application, 'activateIgnoringOtherApps:', [True], [self.c.c_bool], None)
+        self.send(self.application(), 'activateIgnoringOtherApps:', [True], [self.c.c_bool], None)
 
 
 class MenuTimer(MacNative):
@@ -597,13 +636,16 @@ class RestScreen:
         if self.native:
             try:
                 self.native.cover(window, order=order)
-                self.native_error = None
             except Exception as error:
                 self.native_error = str(error)
-        if self.native_error:
-            window.hint.setText('Не удалось перекрыть полноэкранные приложения macOS.\n' + self.native_error)
-        else:
-            window.hint.setText(RestWindow.REST_HINT)
+
+    def native_mode(self, active):
+        if self.native:
+            try:
+                self.native_error = None
+                self.native.begin() if active else self.native.end()
+            except Exception as error:
+                self.native_error = str(error)
 
     def update(self):
         session = ((self.dock.state or {}).get('session') or {})
@@ -611,7 +653,11 @@ class RestScreen:
         if not active:
             for window in self.windows:
                 window.hide()
+            self.native_mode(False)
+            if self.native_error and hasattr(self.dock, 'message'):
+                self.dock.message.setText(self.native_error)
             return
+        self.native_mode(True)
         screens = QApplication.screens()
         if len(self.windows) != len(screens):
             for window in self.windows:
@@ -636,6 +682,7 @@ class RestScreen:
             # Reassert after Qt maps/reorders its panel, and after switching
             # Spaces. Works independently of the optional menu-bar timer.
             self.cover(window)
+            window.hint.setText('Не удалось включить защиту от переключений macOS.\n' + self.native_error if self.native_error else RestWindow.REST_HINT)
         if QApplication.applicationState() != Qt.ApplicationState.ApplicationActive and self.windows:
             # Independent of slow browser scans in the system guard. AppKit
             # activates Anki itself; no Apple Events permission to another app.
@@ -655,6 +702,7 @@ class RestScreen:
             window.hide()
             window.deleteLater()
         self.windows = []
+        self.native_mode(False)
 
 
 class StudyDock(QDockWidget):

@@ -25,7 +25,11 @@ dock=SimpleNamespace(state=state,busy=False,can_shorten_rest=lambda:False,shorte
 screen=ui.RestScreen(dock)
 assert screen.native is None,'offscreen winId is never sent to Objective-C'
 class Native:
-    def __init__(self):self.calls=[];self.activations=0;self.fail=False
+    def __init__(self):self.calls=[];self.activations=0;self.fail=False;self.mode_fail=False;self.modes=[]
+    def begin(self):
+        self.modes.append(True)
+        if self.mode_fail:raise RuntimeError('accessory denied')
+    def end(self):self.modes.append(False)
     def cover(self,window,order=True):
         if self.fail:raise RuntimeError('test failure')
         self.calls.append((window,order))
@@ -43,21 +47,32 @@ with patch.object(ui.QApplication,'screens',return_value=screens),patch.object(u
         assert not window.testAttribute(Qt.WidgetAttribute.WA_QuitOnClose)
         assert window.isVisible()
     assert native.activations==1 and not hasattr(dock,'menu_timer')
+    assert native.modes==[True]
     native.calls.clear();screen.update()
     assert len(native.calls)==2,'Space/app switch reasserts every existing native cover'
     screen.suspended=True;native.calls.clear();screen.update()
     assert not native.calls and all(not w.isVisible() for w in screen.windows)
+    assert native.modes[-1] is False,'emergency suspension releases native restrictions'
     screen.suspended=False;screen.update()
     assert all(w.isVisible() for w in screen.windows)
     native.fail=True;screen.update()
     assert all('Не удалось' in w.hint.text() for w in screen.windows)
     native.fail=False;screen.update()
     assert all(w.hint.text()==ui.RestWindow.REST_HINT for w in screen.windows)
+    native.mode_fail=True;screen.update()
+    assert all('accessory denied' in w.hint.text() for w in screen.windows),'successful covers must not hide mode errors'
+    native.mode_fail=False;screen.update()
     state['session']['phase']='prepare';native.calls.clear();screen.update()
     assert not native.calls and all(not w.isVisible() for w in screen.windows)
+    assert native.modes[-1] is False,'preparation restores normal Anki'
     state['session']['phase']='ready';screen.update()
     assert all(w.isVisible() and not w.back.isHidden() for w in screen.windows)
-    screen.dispose();assert not screen.windows
+    state['session']=None;screen.update()
+    assert native.modes[-1] is False and all(not w.isVisible() for w in screen.windows),'end of series releases mode'
+    state['session']={'id':'rest','phase':'break','blackout':False};screen.update()
+    assert native.modes[-1] is False and all(not w.isVisible() for w in screen.windows),'optional blackout off never restricts switching'
+    state['session']['blackout']=True;screen.update()
+    screen.dispose();assert not screen.windows and native.modes[-1] is False
 
 # Validate native handle routing and ABI without touching real windows/Spaces.
 with patch.object(ui.MacNative,'__init__',lambda self:setattr(self,'c',ctypes)),patch('platform.mac_ver',return_value=('26.6.2',(),'')):
@@ -65,7 +80,7 @@ with patch.object(ui.MacNative,'__init__',lambda self:setattr(self,'c',ctypes)),
 calls=[]
 def send(receiver,selector,args=(),types=(),result='pointer'):
     calls.append((receiver,selector,args,types,result))
-    return 200 if selector=='window' else None
+    return 200 if selector=='window' else 0
 overlay.send=send
 overlay.cover(SimpleNamespace(winId=lambda:100))
 assert calls[0][:2]==(100,'window')
@@ -76,6 +91,8 @@ assert behavior & (1<<0) and behavior & (1<<8) and behavior & (1<<18)
 assert behavior & (1<<4) and not behavior & ((1<<1)|(1<<2)|(1<<3)|(1<<7)|(1<<9)|(1<<16)|(1<<17))
 assert lookup['setCollectionBehavior:'][1]==[ctypes.c_ulong]
 assert lookup['setLevel:']==([1000],[ctypes.c_long],None)
+assert lookup['setStyleMask:']==([1<<7],[ctypes.c_ulong],None)
+assert lookup['setFloatingPanel:']==([True],[ctypes.c_bool],None)
 for key in ('setHidesOnDeactivate:','setCanHide:','setIgnoresMouseEvents:'):
     assert lookup[key]==([False],[ctypes.c_bool],None)
 assert calls[-1][1]=='orderFrontRegardless'
@@ -84,6 +101,43 @@ assert not any(c[1]=='orderFrontRegardless' for c in calls)
 overlay.send=lambda *_args,**_kwargs:None
 try:overlay.cover(SimpleNamespace(winId=lambda:100));raise AssertionError('missing native window must be reported')
 except RuntimeError:pass
+# Snapshot once, reassert without replacing the snapshot, and restore exact
+# original policy/options after suspension, end-of-series or profile disposal.
+overlay.application=lambda:300
+values={'policy':0,'options':(1<<10)|(1<<2),'denied':False}
+def presentation_send(receiver,selector,args=(),types=(),result='pointer'):
+    assert receiver==300
+    calls.append((selector,list(args)))
+    if selector=='activationPolicy':return values['policy']
+    if selector=='presentationOptions':return values['options']
+    if selector=='setActivationPolicy:':
+        assert types==[ctypes.c_long] and result==ctypes.c_bool
+        if values['denied']:return False
+        values['policy']=args[0];return True
+    if selector=='setPresentationOptions:':
+        assert types==[ctypes.c_ulong] and result is None
+        values['options']=args[0]
+    else:raise AssertionError(selector)
+overlay.send=presentation_send
+original=values['options'];calls.clear();overlay.end();assert not calls
+overlay.begin();assert values['policy']==1
+assert values['options']==(1<<1)|(1<<2)|(1<<5)|(1<<8)|(1<<10)
+assert not values['options'] & ((1<<6)|(1<<7)), 'force quit and logout stay available'
+overlay.begin();assert overlay.saved_policy==0 and overlay.saved_presentation==original
+values['options']=0;values['policy']=0;overlay.begin()
+assert values['policy']==1 and values['options'] & (1<<5),'Qt resets are repaired'
+values['denied']=True
+try:overlay.end();raise AssertionError('restore failure must be reported')
+except RuntimeError:pass
+assert overlay.saved_policy==0,'failed restore retains snapshot for retry'
+values['denied']=False;overlay.end()
+assert values['policy']==0 and values['options']==original
+assert overlay.saved_policy is None and overlay.saved_presentation is None
+values['denied']=True
+try:overlay.begin();raise AssertionError('accessory failure must be reported')
+except RuntimeError:pass
+values['denied']=False;overlay.end()
+assert values['policy']==0 and values['options']==original
 # Confirm every native selector exists in the installed AppKit runtime without
 # creating/showing a native window or changing another application's state.
 import sys
@@ -92,7 +146,7 @@ if sys.platform=='darwin':
     runtime=ui.MacNative()
     method=runtime.objc.class_getInstanceMethod
     method.argtypes=[ctypes.c_void_p,ctypes.c_void_p];method.restype=ctypes.c_void_p
-    for name,selectors in {'NSView':['window'], 'NSWindow':['setCollectionBehavior:','setHidesOnDeactivate:','setCanHide:','setIgnoresMouseEvents:','setAnimationBehavior:','setLevel:','orderFrontRegardless']}.items():
+    for name,selectors in {'NSView':['window'], 'NSPanel':['styleMask','setStyleMask:','setFloatingPanel:','setCollectionBehavior:','setHidesOnDeactivate:','setCanHide:','setIgnoresMouseEvents:','setAnimationBehavior:','setLevel:','orderFrontRegardless'], 'NSApplication':['activationPolicy','setActivationPolicy:','presentationOptions','setPresentationOptions:']}.items():
         cls=runtime.objc.objc_getClass(name.encode())
         assert cls
         for selector in selectors:
