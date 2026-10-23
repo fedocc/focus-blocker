@@ -31,13 +31,13 @@
   if(h.loading){health.innerHTML='<div class="ss-muted">Проверяем повторения…</div>';return;}
   if(h.error){health.innerHTML='<div class="ss-muted">Не удалось получить статистику: '+esc(h.error)+'</div>';return;}
   const retention=h.retention===null?'—':Number(h.retention).toLocaleString('ru-RU')+'%';
-  health.innerHTML=`<div class="ss-panel-head"><span class="ss-panel-title">Качество повторения</span><span class="ss-pill">${h.fsrs?'FSRS включён':'FSRS выключен'}</span></div>
+  health.innerHTML=`<div class="ss-panel-head"><span class="ss-panel-title">Повторение</span><span class="ss-pill">${h.fsrs?'FSRS включён':'FSRS выключен'}</span></div>
    <div class="ss-review-tiles">
-    <div><strong>${esc(h.overdue)}</strong><span>Просрочено</span><small>${esc(h.review_due)} доступных повторений на сегодня, включая просроченные</small></div>
-    <div><strong>${retention}</strong><span>Удержание · 30 дней</span><small>${h.review_answers?esc(h.recalled)+' из '+esc(h.review_answers)+' ответов; повторения всей коллекции':'Пока нет ответов на запланированных повторениях'}</small></div>
-    <div><strong>${esc(h.repair_count)}</strong><span>Карточки на переработку</span><small>Пиявки и тег slovo::repair · старый архив исключён</small></div>
+    <div><strong>${esc(h.overdue)}</strong><span>Просрочено</span><small title="Доступные review-карточки со сроком сегодня или раньше">К повторению: ${esc(h.review_due)}</small></div>
+    <div><strong>${retention}</strong><span title="По запланированным повторениям всей коллекции. Обучение и переучивание исключены.">Удержание · 30 дней</span><small>${h.review_answers?esc(h.recalled)+' из '+esc(h.review_answers)+' ответов':'Пока нет повторений'}</small></div>
+    <div><strong>${esc(h.repair_count)}</strong><span>Карточки на переработку</span><small title="Пиявки и заметки с тегом slovo::repair. Старый архив исключён.">Проверить формулировки</small></div>
    </div>
-   <div class="ss-review-footer"><span class="ss-muted">Забыл — Again. Вспомнил с трудом — Hard. Проблемную карточку лучше переформулировать.</span><button type="button" class="ss-repair-open">На переработку ↗</button></div>
+   <div class="ss-review-footer"><button type="button" class="ss-repair-open" title="Забыл — Again. Вспомнил с трудом — Hard. Проблемную карточку лучше переформулировать.">На переработку ↗</button></div>
    ${h.setup_error?'<div class="ss-review-error">Настройки не применены: '+esc(h.setup_error)+'</div>':''}`;
   health.querySelector('.ss-repair-open').onclick=()=>pycmd('slovo:review-repair');
  }
@@ -90,7 +90,7 @@
   });
  }
  function recordRows(records){
-  if(!records.length)return '<div class="ss-empty">Пока нет блоков за этот период.<br>Заверши первый блок — здесь появится история учёбы.</div>';
+  if(!records.length)return '<div class="ss-empty">Пока нет блоков за этот период.</div>';
   return '<div class="ss-timeline">'+[...records].sort((a,b)=>b.ended_at-a.ended_at).map(r=>{
    const time=new Date(r.ended_at*1000).toLocaleTimeString('ru-RU',{timeZone:'Europe/Moscow',hour:'2-digit',minute:'2-digit'});
    const status={completed:'Завершён',interrupted:'Прерван',live:'Сейчас',repair:'Ремонт службы · вне показателей'}[r.outcome];
@@ -199,10 +199,10 @@
   const earned=records.filter(r=>r.outcome!=='repair');
   const seconds=earned.reduce((s,r)=>s+duration(r),0),attempts=earned.reduce((s,r)=>s+r.attempts,0);
   const activeDays=new Set(earned.filter(r=>duration(r)>0).map(r=>r.day)).size;
-   body.innerHTML=`<div class="ss-summary-grid"><div class="ss-summary-tile"><strong>${completed}</strong><span class="ss-muted">полных блоков</span></div><div class="ss-summary-tile"><strong>${activeDays?fmt(seconds/activeDays):'—'}</strong><span class="ss-muted">на день с учёбой</span></div><div class="ss-summary-tile"><strong>${seconds?((attempts/seconds)*3600).toFixed(1).replace('.',','):'—'}</strong><span class="ss-muted">срабатываний защиты / ч</span></div><div class="ss-summary-tile"><strong>${interrupted}</strong><span class="ss-muted">прервано</span></div></div><div class="ss-muted">Сравнивай часы: длительность блоков настраивается. Серия считается по дням с полным блоком. Повторные срабатывания защиты считаются отдельно. Завершение блока не означает выполнение задачи.</div>`;restoreDetails(body,focusKey);return;
+   body.innerHTML=`<div class="ss-summary-grid"><div class="ss-summary-tile"><strong>${completed}</strong><span class="ss-muted">полных блоков</span></div><div class="ss-summary-tile"><strong>${activeDays?fmt(seconds/activeDays):'—'}</strong><span class="ss-muted">на день с учёбой</span></div><div class="ss-summary-tile"><strong>${seconds?((attempts/seconds)*3600).toFixed(1).replace('.',','):'—'}</strong><span class="ss-muted">срабатываний защиты / ч</span></div><div class="ss-summary-tile"><strong>${interrupted}</strong><span class="ss-muted">прервано</span></div></div><div class="ss-muted" title="Длительности блоков различаются. Серия считается по дням с полным блоком. Повторные срабатывания защиты считаются отдельно.">Сравнивай часы учёбы. Завершение блока не означает выполнение задачи.</div>`;restoreDetails(body,focusKey);return;
   }
   const sorted=aggregateUsage(model.data.usage.days,key=>model.selected?key===model.selected:inRange(key)),total=sorted.reduce((s,r)=>s+r.seconds,0);
-  body.innerHTML=(sorted.length?`<div class="ss-muted">На экране в блоках · ${fmt(total)}</div>`+sorted.map(row=>usageMarkup(row,total)).join(''):'<div class="ss-empty">Экранное время начнёт собираться в следующем блоке.<br>Для прошлых блоков доступны время таймера и история.</div>')+`<button type="button" class="ss-detail-settings">Детализация · доступ и настройки →</button><div class="ss-muted">${model.data.tracking?'Учёт включён':'Учёт выключен'} · ${model.data.detail_tracking?'подробности включены':'подробности выключены или недоступны'}. Шаг 5 секунд, только переднее приложение в учебных блоках при открытом Anki. Лекции без нажатий учитываются. Без детализации — старые данные, переходы вкладок или отсутствие доступа. Это время на экране, а не оценка внимания.</div>`;
+  body.innerHTML=(sorted.length?`<div class="ss-muted">На экране в блоках · ${fmt(total)}</div>`+sorted.map(row=>usageMarkup(row,total)).join(''):'<div class="ss-empty">Пока нет данных по приложениям.</div>')+`<button type="button" class="ss-detail-settings">Настроить детализацию →</button><div class="ss-muted" title="Только переднее приложение в учебных блоках при открытом Anki; шаг 5 секунд. Без детализации — старые данные, переходы вкладок или отсутствие доступа. Экранное время не измеряет внимание.">${model.data.tracking?'Учёт включён':'Учёт выключен'} · ${model.data.detail_tracking?'подробности включены':'подробности выключены или недоступны'}.</div>`;
   body.querySelector('.ss-detail-settings').onclick=()=>pycmd('slovo:details-settings');
   restoreDetails(body,focusKey);
  }

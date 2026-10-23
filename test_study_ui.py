@@ -10,6 +10,68 @@ import unittest
 
 class StudyUiTests(unittest.TestCase):
     @unittest.skipUnless(importlib.util.find_spec('aqt'), 'Anki Qt is unavailable in this Python')
+    def test_compact_settings_committed_preview_and_menu_profile_lifecycle(self):
+        program = r'''
+import json,tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+from aqt.qt import QApplication,QMainWindow
+from anki_study import dashboard as ui
+app=QApplication([]);window=QMainWindow();window.col=None;ui.mw=window
+window.form=SimpleNamespace(menuTools=window.menuBar().addMenu('Tools'))
+window.addonManager=SimpleNamespace(setWebExports=lambda *_:None)
+ui.bridge.applications=lambda:[]
+ui.StudyDock.run=lambda *_:None
+ui.update_home_widget=lambda *_:None
+ui.ReviewHealth.refresh=lambda *_args,**_kwargs:None
+with tempfile.TemporaryDirectory() as td,patch.object(ui.sys,'platform','linux'):
+ ui.PREFS=Path(td)/'preferences.json'
+ original={'timing':{'focus':50,'short':7,'long':20,'every':2},'series_blocks':4,
+           'auto_next':True,'rest_blackout':True,'token':'test-only'}
+ ui.PREFS.write_text(json.dumps(original));before=ui.PREFS.read_bytes()
+ for _ in range(2):
+  ui.loaded();dock=window._slovo_study_dock
+  assert dock.isHidden(),'profile opening must not show the panel'
+  assert not dock.rhythm_settings.toggle.isChecked()
+  assert dock.rhythm_settings.body.isHidden() and dock.behavior_settings.body.isHidden()
+  assert dock.result_actions.body.isHidden() and dock.timeline.detail.isHidden()
+  assert ui.PREFS.read_bytes()==before,'collapsing controls never changes saved preferences'
+  dock.rhythm_settings.toggle.click();dock.behavior_settings.toggle.click()
+  assert not dock.rhythm_settings.body.isHidden() and not dock.behavior_settings.body.isHidden()
+  assert all(control.isEnabled() for control in dock.timing_controls.values())
+  assert dock.auto_next.isChecked() and dock.blackout.isChecked()
+  dock.update_timeline()
+  assert dock.timeline.detail.isHidden(),'status repaint must not expand explanations'
+  dock.timeline.choose('rest:0');assert not dock.timeline.detail.isHidden()
+  dock.update_timeline();assert dock.timeline.bar.selected=='rest:0'
+  # A running session's confirmed plan overrides old editable defaults.
+  dock.state={'session':{'id':'test','phase':'focus','timing':{'focus':25,'short':5,'long':30,'every':4},
+      'auto_continue':True,'blackout':True,'blocks_total':3,'blocks_left':3,'cycle_index':1,'remaining':1500}}
+  dock.update_timeline()
+  assert dock.timeline.model['focus_minutes']==75
+  assert dock.cycle.text().startswith('25 мин учёбы · 5 мин отдыха')
+  assert 'серия 3 бл.' in dock.cycle.text()
+  assert ui.PREFS.read_bytes()==before
+  menus=window.form.menuTools.actions()
+  assert len(menus)==1 and menus[0].text()=='Фокус и учёба'
+  menu=menus[0].menu()
+  assert [a.text() for a in menu.actions()]==['Открыть фокус','Карточки на переработку…','Настройки','Обслуживание']
+  settings=menu.actions()[2].menu();service=menu.actions()[3].menu()
+  assert 'Обои · время суток…' in [a.text() for a in settings.actions()]
+  assert 'Архивировать текущие колоды…' in [a.text() for a in service.actions()]
+  ui.unloaded();app.processEvents()
+  assert not window.form.menuTools.actions(),'profile reopening must not duplicate menus'
+  assert window._slovo_study_dock is None and window._slovo_study_menu is None
+window.close()
+print('Compact UI / profile menus passed')
+'''
+        result = subprocess.run([sys.executable, '-B', '-c', program], cwd=Path(__file__).parent,
+                                env=dict(os.environ, QT_QPA_PLATFORM='offscreen'),
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(importlib.util.find_spec('aqt'), 'Anki Qt is unavailable in this Python')
     def test_mac_rest_panels_cover_all_screens_without_menu_timer_and_suspend_cleanly(self):
         program = r'''
 import ctypes

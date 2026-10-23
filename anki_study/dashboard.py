@@ -7,7 +7,7 @@ from pathlib import Path
 
 from aqt import mw, gui_hooks
 from aqt.qt import (QAction, QComboBox, QDesktopServices, QDockWidget, QFileDialog, QDialog, QFrame,
-                    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget, QProgressBar,
+                    QHBoxLayout, QInputDialog, QLabel, QLineEdit, QListWidget,
                     QListWidgetItem, QMessageBox, QPushButton, QTimer, Qt, QUrl, QAbstractItemView,
                     QVBoxLayout, QWidget, QScrollArea, QToolButton, QSizePolicy, QSize, QRect, QApplication, QCheckBox, QSpinBox,
                     QPainter, QColor, QPen, QFont, QRectF)
@@ -25,7 +25,7 @@ QLabel#eyebrow { color: #89aaa9; font-size: 10px; font-weight: 600; letter-spaci
 QLabel#muted { color: #8ea8b4; font-size: 11px; }
 QLabel#sectionTitle { color: #dce8eb; font-size: 13px; font-weight: 600; }
 QLabel#phase { color: #d7b77d; font-size: 10px; font-weight: 600; letter-spacing: 2px; }
-QLabel#timer { color: #f0d29e; font-size: 64px; font-weight: 600; letter-spacing: -2px; }
+QLabel#timer { color: #f0d29e; font-size: 54px; font-weight: 600; letter-spacing: -2px; }
 QLabel#taskHeading { color: #c9dbdf; font-size: 13px; }
 QLabel#notice { color: #c4d8da; background: #19323e; border: 1px solid #2a4b57; border-radius: 10px; padding: 10px; font-size: 11px; }
 QFrame#focusHero { background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #1c3d4d,stop:1 #112832); border: 1px solid #385661; border-radius: 20px; }
@@ -49,8 +49,6 @@ QWidget#focusRoot QPushButton#emergency { background: transparent; border: none;
 QWidget#focusRoot QPushButton:disabled, QWidget#focusRoot QLineEdit:disabled { color: #718a95; border-color: #213b47; }
 QToolButton { background: transparent; color: #8ca7b1; border: none; border-radius: 6px; padding: 4px; }
 QToolButton:hover { background: #27414d; color: #e5c38d; }
-QProgressBar { background: #223e49; border: none; border-radius: 3px; }
-QProgressBar::chunk { background: #d9ba82; border-radius: 3px; }
 QScrollArea { background: transparent; border: none; }
 QScrollBar:vertical { background: transparent; width: 5px; margin: 0; }
 QScrollBar::handle:vertical { background: #35515c; border-radius: 2px; min-height: 32px; }
@@ -85,6 +83,34 @@ def card(parent_layout, name='focusCard'):
     layout.setSpacing(10)
     parent_layout.addWidget(frame)
     return frame, layout
+
+
+class Disclosure(QFrame):
+    """Keep occasional controls available without occupying the daily view."""
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self.setMinimumWidth(0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        self.toggle = QToolButton()
+        self.toggle.setText(title)
+        self.toggle.setCheckable(True)
+        self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.toggle.setStyleSheet('QToolButton {color:#b8cdd4;background:transparent;border:0;padding:5px 0;text-align:left;}')
+        self.toggle.setAccessibleName(title)
+        layout.addWidget(self.toggle)
+        self.body = QWidget()
+        self.content = QVBoxLayout(self.body)
+        self.content.setContentsMargins(0, 0, 0, 0)
+        self.content.setSpacing(9)
+        layout.addWidget(self.body)
+        self.body.hide()
+        def expand(checked):
+            self.body.setVisible(checked)
+            self.toggle.setArrowType(Qt.ArrowType.DownArrow if checked else Qt.ArrowType.RightArrow)
+        self.toggle.toggled.connect(expand)
 
 
 class Notice(QLabel):
@@ -535,18 +561,18 @@ class TimelineBar(QWidget):
 class SeriesTimeline(QFrame):
     def __init__(self):
         super().__init__()
-        self.setObjectName('focusCard')
+        self.setObjectName('focusTimeline')
         self.setMinimumWidth(0)
         self.setSizePolicy(QSizePolicy.Policy.Ignored,QSizePolicy.Policy.Preferred)
-        layout=QVBoxLayout(self);layout.setContentsMargins(14,12,14,12);layout.setSpacing(4)
-        layout.addWidget(label('План серии · нажми на участок', 'sectionTitle'))
+        layout=QVBoxLayout(self);layout.setContentsMargins(0,4,0,0);layout.setSpacing(4)
+        self.setToolTip('Нажми на участок, чтобы увидеть длительность и правила перехода.')
         self.total=label('');layout.addWidget(self.total)
         self.bar=TimelineBar(self.choose,self);layout.addWidget(self.bar)
         legend=QLabel('<span style="color:#df747b">■ Бот</span> &nbsp; <span style="color:#64a6e4">■ Отдых</span> &nbsp; <span style="color:#d6b77c">■ Выбор</span><br>○ По кнопке, без лимита &nbsp; ◆ Автоматически')
         legend.setStyleSheet('font-size:10px;color:#98b0bc;');legend.setWordWrap(True);layout.addWidget(legend)
-        self.title=label('', 'taskHeading');layout.addWidget(self.title)
-        self.detail=label('');self.detail.setMinimumHeight(66);layout.addWidget(self.detail)
-        self.policy=label('');layout.addWidget(self.policy)
+        self.title=label('', 'taskHeading');layout.addWidget(self.title);self.title.hide()
+        self.detail=label('');layout.addWidget(self.detail);self.detail.hide();self.details_requested=False
+        self.policy=label('');self.policy.setParent(self);self.policy.hide()
         self.model=None
 
     def set_plan(self, model):
@@ -556,16 +582,20 @@ class SeriesTimeline(QFrame):
             self.bar.selected=model['active_id'] or 'focus:0'
         self.bar.nodes=model['nodes']
         minutes=round(model['timer_minutes'])
-        self.total.setText(f'{model["blocks"]} бл. · бот {model["focus_minutes"]} мин · по таймерам {minutes//60} ч {minutes%60:02} мин')
+        self.total.setText(f'Учёба {model["focus_minutes"]} мин · всего {minutes//60} ч {minutes%60:02} мин')
         self.total.setToolTip('План без дополнительного бота и ожиданий по кнопке. Подготовку можно закончить раньше. Ширина участков условная, длительности подписаны в минутах.')
         self.policy.setText(('Отдых защищён чёрным экраном.' if model['blackout'] else 'Пунктирный отдых — без чёрного экрана.') + '\nПосле серии — свободное время.')
         self.bar.setAccessibleDescription(' → '.join(n['title'] for n in model['nodes']))
-        self.choose(self.bar.selected)
+        self.bar.setToolTip(self.policy.text())
+        self.choose(self.bar.selected, reveal=False)
 
-    def choose(self, identity):
+    def choose(self, identity, reveal=True):
         if not self.model:return
         node=next((n for n in self.model['nodes'] if n['id']==identity),None)
         if not node:return
+        self.details_requested = self.details_requested or reveal
+        self.title.setVisible(self.details_requested)
+        self.detail.setVisible(self.details_requested)
         self.bar.selected=identity
         self.title.setText(('Сейчас: ' if node.get('active') else '') + node['title'])
         self.detail.setText(node['detail'])
@@ -574,7 +604,7 @@ class SeriesTimeline(QFrame):
 
 class RestWindow(QDialog):
     """A black, non-destructive cover. The service owns rest and app enforcement."""
-    REST_HINT = 'Встань из-за стола. Пройдись, подыши, разомнись.\nПроведи этот перерыв без телефона и экрана.'
+    REST_HINT = 'Встань из-за стола. Пройдись или разомнись.'
     def __init__(self, dock, screen):
         # A transient child of Anki follows its parent's Space. Each cover must
         # instead be an independent panel, owned and disposed by RestScreen.
@@ -770,7 +800,7 @@ class StudyDock(QDockWidget):
         layout.setContentsMargins(18, 12, 18, 16)
         layout.setSpacing(14)
         _, hero = card(layout, 'focusHero')
-        hero.setContentsMargins(16, 20, 16, 20)
+        hero.setContentsMargins(16, 14, 16, 14)
         hero.setSpacing(4)
         self.phase_tag = label('ГОТОВ К СТАРТУ', 'phase')
         self.phase_tag.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -784,9 +814,13 @@ class StudyDock(QDockWidget):
         hero.addWidget(self.heading)
         self.cycle = label('')
         self.cycle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hero.addWidget(self.cycle)
-        _, modes = card(layout)
-        modes.addWidget(label('Твой ритм', 'sectionTitle'))
+        rhythm_card, rhythm = card(layout)
+        layout.removeWidget(rhythm_card)
+        self.cycle.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        rhythm.addWidget(self.cycle)
+        self.rhythm_settings = Disclosure('Изменить ритм')
+        rhythm.addWidget(self.rhythm_settings)
+        modes = self.rhythm_settings.content
         timing = bridge.timing_settings(self.preferences)
         self.timing_controls = {}
         for key, title, maximum in (('focus', 'Учёба', 240), ('short', 'Короткий отдых', 60),
@@ -808,20 +842,22 @@ class StudyDock(QDockWidget):
         self.auto_next = QCheckBox('Автопродолжение серии')
         self.auto_next.setStyleSheet('color:#c4d9de;')
         self.auto_next.setChecked(self.preferences.get('auto_next', True))
-        modes.addWidget(self.auto_next)
+        self.behavior_settings = Disclosure('Дополнительно')
+        self.behavior_settings.content.addWidget(self.auto_next)
         self.series_blocks = QSpinBox()
         self.series_blocks.setRange(1, 24)
         self.series_blocks.setValue(min(24, max(1, self.preferences.get('series_blocks', 4))))
         self.series_blocks.setPrefix('Блоков в серии: ')
         modes.addWidget(self.series_blocks)
-        self.blackout = QCheckBox('Чёрный экран на отдыхе · возврат в Anki')
+        modes.addWidget(self.behavior_settings)
+        self.blackout = QCheckBox('Чёрный экран на отдыхе')
         self.blackout.setStyleSheet('color:#c4d9de;')
         self.blackout.setChecked(self.preferences.get('rest_blackout', True))
-        modes.addWidget(self.blackout)
+        self.behavior_settings.content.addWidget(self.blackout)
         self.preparation_note = label('После отдыха — «Я вернулся», затем 5 минут на задачи. Без изменений продолжатся прежние. После последнего блока серия завершится.')
-        modes.addWidget(self.preparation_note)
+        self.behavior_settings.content.addWidget(self.preparation_note)
         self.timeline = SeriesTimeline()
-        modes.addWidget(self.timeline)
+        rhythm.addWidget(self.timeline)
         for control, signal in ([(control, control.valueChanged) for control in self.timing_controls.values()] +
                                 [(self.auto_next, self.auto_next.toggled), (self.series_blocks, self.series_blocks.valueChanged), (self.blackout, self.blackout.toggled)]):
             signal.connect(self.save_mode)
@@ -829,20 +865,14 @@ class StudyDock(QDockWidget):
         self.timer_label.setText(f'{self.timing_values()["focus"]:02}:00')
         self.update_timeline()
         day_row = QHBoxLayout()
-        day_row.addWidget(label('ТВОЙ ДЕНЬ', 'eyebrow'))
+        day_row.addWidget(label('СЕГОДНЯ', 'eyebrow'))
         self.day_count = label('0 за день', 'sectionTitle')
         day_row.addStretch()
         day_row.addWidget(self.day_count)
-        layout.addLayout(day_row)
-        self.day_progress = QProgressBar()
-        self.day_progress.setRange(0, 5)
-        self.day_progress.setTextVisible(False)
-        self.day_progress.setFixedHeight(6)
-        layout.addWidget(self.day_progress)
-        self.progress = label('Выбери задачи и длительности для серии.')
+        self.progress = label('');self.progress.hide()
         layout.addWidget(self.progress)
         self.task_card, task_layout = card(layout)
-        task_layout.addWidget(label('01   Задачи блока', 'sectionTitle'))
+        task_layout.addWidget(label('Задачи', 'sectionTitle'))
         self.task_list = TaskList()
         self.task_list.setObjectName('focusTasks')
         self.task_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -851,7 +881,7 @@ class StudyDock(QDockWidget):
         self.task_list.hide()
         task_layout.addWidget(self.task_list)
         self.title = QLineEdit()
-        self.title.setPlaceholderText('Лекция по DL + конспект…')
+        self.title.setPlaceholderText('Или своя задача…')
         self.title.setAccessibleName('Результат учебного блока')
         self.title.setMaxLength(300)
         task_layout.addWidget(self.title)
@@ -868,7 +898,7 @@ class StudyDock(QDockWidget):
         task_layout.addLayout(row)
         _, apps_layout = card(layout)
         apps_title = QHBoxLayout()
-        apps_title.addWidget(label('02   Приложения', 'sectionTitle'))
+        apps_title.addWidget(label('Приложения', 'sectionTitle'))
         apps_title.addStretch()
         self.app_count = label('1 выбрано')
         apps_title.addWidget(self.app_count)
@@ -880,7 +910,9 @@ class StudyDock(QDockWidget):
         self.app_picker_button = QPushButton('Выбрать приложения  →')
         self.app_picker_button.clicked.connect(self.pick_apps)
         apps_layout.addWidget(self.app_picker_button)
-        apps_layout.addWidget(label('Anki и Фото доступны всегда'))
+        self.app_summary.setToolTip('Anki, Фото и системные окна доступны во время учёбы.')
+        layout.addWidget(rhythm_card)
+        layout.addLayout(day_row)
         self.picker = QDialog(self)
         self.picker.setObjectName('focusPicker')
         self.picker.setWindowTitle('Приложения для блока')
@@ -890,7 +922,7 @@ class StudyDock(QDockWidget):
         picker_layout.setContentsMargins(22, 22, 22, 22)
         picker_layout.setSpacing(14)
         picker_layout.addWidget(label('Что понадобится для учёбы?', 'sectionTitle'))
-        self.picker_note = label('Выбери до старта. Твой выбор сохранится для следующего блока.')
+        self.picker_note = label('Выбор сохраняется для следующих блоков.')
         picker_layout.addWidget(self.picker_note)
         self.search = QLineEdit()
         self.search.setPlaceholderText('Поиск приложений…')
@@ -910,7 +942,7 @@ class StudyDock(QDockWidget):
             item.setCheckState(Qt.CheckState.Checked if bundle in selected else Qt.CheckState.Unchecked)
             self.apps.addItem(item)
         picker_layout.addWidget(self.apps)
-        picker_layout.addWidget(label('Anki, Фото и системные окна остаются доступны. Остальные приложения скрываются без закрытия документов.'))
+        self.apps.setToolTip('Во время учёбы Anki, Фото и системные окна доступны. Остальные приложения скрываются без закрытия документов.')
         picker_actions = QHBoxLayout()
         cancel = QPushButton('Отмена')
         cancel.clicked.connect(self.picker.reject)
@@ -942,9 +974,7 @@ class StudyDock(QDockWidget):
         self.title.textChanged.connect(self.update_start_enabled)
         self.title.textChanged.connect(self.queue_next_selection)
         footer_layout.addWidget(self.start)
-        lock_note = label('После старта настройки фиксируются. Между блоками можно выбрать задачи и приложения.')
-        lock_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer_layout.addWidget(lock_note)
+        self.start.setToolTip('После старта длительности фиксируются. Задачи и приложения можно изменить в подготовке следующего блока.')
         self.emergency = QPushButton('Экстренно прервать…')
         self.emergency.setObjectName('emergency')
         self.emergency.clicked.connect(self.request_emergency)
@@ -964,7 +994,9 @@ class StudyDock(QDockWidget):
         self.receipt.setObjectName('quiet')
         self.receipt.clicked.connect(self.save_receipt)
         result_row.addWidget(self.receipt)
-        footer_layout.addLayout(result_row)
+        self.result_actions = Disclosure('Результат')
+        self.result_actions.content.addLayout(result_row)
+        footer_layout.addWidget(self.result_actions)
         self.title.setEnabled(False)
         self.start.setEnabled(False)
         self.emergency.setEnabled(False)
@@ -1019,7 +1051,7 @@ class StudyDock(QDockWidget):
             session = value['session']
             phase = session['phase'] if session else 'idle'
             prepare_minutes = value.get('prepare_seconds', 120) // 60
-            self.preparation_note.setText(f'После отдыха — «Я вернулся», затем {prepare_minutes} мин на задачи. Без изменений продолжатся прежние. После последнего блока серия завершится.')
+            self.preparation_note.setText(f'После «Я вернулся» — {prepare_minutes} мин на выбор, затем автостарт.' if (session or {}).get('auto_continue', self.auto_next.isChecked()) else 'Один блок без автопродолжения.')
             overtime = bool(session and session.get('awaiting_rest'))
             locked = bool(session) and phase != 'prepare'
             for control in (self.title, self.task_list, self.apps, self.refresh, self.pair, self.app_picker_button):
@@ -1037,22 +1069,17 @@ class StudyDock(QDockWidget):
             self.emergency.setEnabled(bool(session) and value['emergency_available'])
             self.emergency.setVisible(bool(session))
             self.phase_tag.setText('ДОПОЛНИТЕЛЬНОЕ ВРЕМЯ' if overtime else {'idle': 'ГОТОВ К СТАРТУ', 'focus': 'ВРЕМЯ ФОКУСА', 'break': 'ВРЕМЯ ОТДЫХА', 'ready': 'ПЕРЕРЫВ ЗАВЕРШЁН', 'prepare': 'ВЫБОР СЛЕДУЮЩЕГО БЛОКА'}[phase])
-            self.start.setText('Начать отдых   →' if overtime else {'idle': 'Начать серию   →', 'focus': 'Блок идёт · настройки закрыты', 'break': 'Сначала восстановись', 'ready': 'Я вернулся · выбрать задачи →', 'prepare': 'Начать сейчас →'}[phase])
+            self.start.setText('Начать отдых   →' if overtime else {'idle': 'Начать серию   →', 'focus': 'Идёт учёба', 'break': 'Идёт отдых', 'ready': 'Я вернулся →', 'prepare': 'Начать сейчас →'}[phase])
             self.cycle.setText(bridge.cycle_text(session or self.timing_values()))
             self.update_timeline()
             self.tick_display()
             count = value['completed_today']
             total = (session or {}).get('blocks_total', 0)
-            self.day_progress.setRange(0, total or 5)
-            self.day_progress.setValue(total - session.get('blocks_left', total) + (phase == 'break') if total else min(count, 5))
             self.day_count.setText(f'{count} за день' + (f' · серия {total - session.get("blocks_left", total) + 1}/{total}' if total else ''))
-            attempts = sum(session.get('attempts', {}).values()) + sum(session.get('app_attempts', {}).values()) if session else 0
-            self.progress.setText(('Минимум выполнен. Дополнительное время учитывается; отдых ждёт подтверждения.' if overtime else
-                                   'Перерыв перед следующим блоком.' if phase == 'break' else
-                                   f'Нажми «Я вернулся» — начнутся {prepare_minutes} мин выбора.' if phase == 'ready' else
-                                   f'На выбор — {prepare_minutes} мин, затем блок начнётся автоматически. Выбор сохраняется сразу.' if phase == 'prepare' else
-                                   f'Настройки зафиксированы · блокировок: {attempts}' if phase == 'focus' else 'Выбери режим и число блоков в серии.') +
-                                  f'\nСрабатываний за день: {value.get("attempts_today", 0)}')
+            self.progress.setText('Отдых начнётся по кнопке.' if overtime else
+                                  f'Автостарт через {prepare_minutes} мин.' if phase == 'prepare' else '')
+            self.progress.setVisible(overtime or phase == 'prepare')
+
             if session:
                 self.heading.setText(session['task']['title'])
                 committed = session['task'].get('items', [session['task']])
@@ -1086,8 +1113,6 @@ class StudyDock(QDockWidget):
                 self.emergency.setText('Подтвердить прерывание…' if pending else 'Экстренно прервать…')
             if phase == 'idle' and self.preferences.get('token') and time.monotonic() - self.last_plan_at > 300:
                 self.load_plan()
-            if phase == 'break' and self.last_phase == 'focus':
-                self.message.setText('Блок завершён. Отдохни и приложи результат в Слове. Таймер сам задачу не отмечает.')
             self.last_phase = phase
         self.run(lambda: bridge.helper('study-status'), updated)
 
@@ -1107,8 +1132,12 @@ class StudyDock(QDockWidget):
         return {key: control.value() for key, control in self.timing_controls.items()}
 
     def update_timeline(self):
-        self.timeline.set_plan(bridge.series_plan(self.timing_values(),self.series_blocks.value(),
-            self.auto_next.isChecked(),self.blackout.isChecked(),self.state))
+        model = bridge.series_plan(self.timing_values(),self.series_blocks.value(),
+            self.auto_next.isChecked(),self.blackout.isChecked(),self.state)
+        self.timeline.set_plan(model)
+        t = bridge.timing_settings(((self.state or {}).get('session')) or self.timing_values())
+        self.cycle.setText(f'{t["focus"]} мин учёбы · {t["short"]} мин отдыха\n'
+                           f'Длинный {t["long"]} мин после {t["every"]} бл. · серия {model["blocks"]} бл.')
 
     def save_mode(self, *_):
         if (self.state or {}).get('session'):
@@ -1236,7 +1265,7 @@ class StudyDock(QDockWidget):
         automatic = (self.state or {}).get('auto_study_apps', {})
         names = [name for bundle, name in self.application_names.items() if bundle in automatic]
         self.auto_apps_note.setText(
-            'Забыл отметить? Zoom, код, конспекты и PDF доступны автоматически во время фокуса.'
+            'Учебные приложения — автоматически.'
             if automatic else 'Автодопуск ещё не установлен. Обнови службу через install-study.command.')
         self.auto_apps_note.setToolTip('Автоматически: ' + ', '.join(names) if automatic else '')
         for index in range(self.apps.count()):
@@ -1251,11 +1280,11 @@ class StudyDock(QDockWidget):
         editable = self.can_edit()
         automatic = (self.state or {}).get('auto_study_apps', {})
         self.picker_note.setText(
-            ('Приложения с пометкой «автоматически» уже разрешены без галочки. Остальной выбор зафиксирован до конца блока.'
+            ('Автоматические доступны. Остальной выбор зафиксирован.'
              if automatic else 'Блок идёт. Выбор зафиксирован; автодопуск требует обновления службы.')
             if not editable else
-            ('С пометкой «автоматически» можно открыть даже без галочки. Остальные выбери до старта. Выбор сохранится.'
-             if automatic else 'Выбери до старта. Твой выбор сохранится для следующего блока.'))
+            ('Автоматические уже доступны. Выбери остальные.'
+             if automatic else 'Выбор сохраняется для следующих блоков.'))
         previous = {self.apps.item(i).data(Qt.ItemDataRole.UserRole): self.apps.item(i).checkState()
                     for i in range(self.apps.count())}
         self.search.clear()
@@ -1315,8 +1344,8 @@ class StudyDock(QDockWidget):
         self.plan_date = value['date']
         self.selected_ids.intersection_update(task['occurrence_id'] for task in self.tasks)
         self.render_tasks(self.tasks)
-        self.pair.setText('Слово подключено')
-        self.message.setText(f'План на {value["date"]}: задач {len(self.tasks)}. Отметь нужные задачи и выбери приложения.')
+        self.pair.setText('Слово · подключено')
+        self.message.setText('')  # Successful background refresh needs no banner.
         self.update_start_enabled()
         update_home_widget()
 
@@ -1376,7 +1405,7 @@ class StudyDock(QDockWidget):
                 self.state = dict(self.state or {}, session=value)
                 self.tick_display()
                 update_home_widget()
-                self.message.setText('Условия блока зафиксированы системной службой.')
+                self.message.setText('')
             self.poll()
         self.run(lambda: bridge.helper(command, payload), started)
 
@@ -1395,7 +1424,7 @@ class StudyDock(QDockWidget):
                 self.phase_notice.observe(self.state)
                 self.tick_display()
                 update_home_widget()
-                self.message.setText('Перерыв начался. Дополнительное время сохранено в этом блоке.')
+                self.message.setText('')
             else:
                 self.phase_notice.detail.setText('Не удалось начать отдых.\n' + self.message.text())
             self.update_start_enabled()
@@ -1420,7 +1449,7 @@ class StudyDock(QDockWidget):
                 self.state = dict(self.state, session=value['session'])
                 self.tick_display()
                 update_home_widget()
-                self.message.setText('Длинный отдых сокращён. Уже прошедшее время отдыха учтено.')
+                self.message.setText('Отдых сокращён.')
             self.poll()
         self.run(lambda: bridge.helper('study-break-shorten', {'session_id': session_id}), finished)
 
@@ -1520,7 +1549,7 @@ def choose_wallpaper():
     layout = QVBoxLayout(dialog)
     layout.setContentsMargins(24, 24, 24, 24)
     layout.setSpacing(14)
-    layout.addWidget(label('Твоя атмосфера для учёбы', 'sectionTitle'))
+    layout.addWidget(label('Обои', 'sectionTitle'))
     theme = QComboBox()
     theme.setAccessibleName('Тема обоев')
     for key, name in bridge.WALLPAPER_THEMES.items():
@@ -1535,7 +1564,7 @@ def choose_wallpaper():
         period.addItem(name, key)
     period.setCurrentIndex(max(0, period.findData(dock.preferences.get('wallpaper_period', 'auto'))))
     layout.addWidget(period)
-    note = label('Семь состояний суток. Утром солнце слева, вечером — справа.\nВыбор сохранится после перезапуска Anki.')
+    note = label('Автоматически — по времени Mac.')
     note.setWordWrap(True)
     layout.addWidget(note)
     buttons = QHBoxLayout()
@@ -1699,25 +1728,29 @@ def restore_review_settings():
 
 def loaded():
     mw.addonManager.setWebExports(__name__, r'(wallpaper-([a-z]+-)?(predawn|dawn|morning|day|golden|evening|night)\.png|focus-stats\.(js|css))')
-    action = QAction('Учебные блоки · Слово', mw)
+    study_menu = mw.form.menuTools.addMenu('Фокус и учёба')
+    mw._slovo_study_menu = study_menu
+    action = QAction('Открыть фокус', mw)
     action.triggered.connect(show_study)
-    mw.form.menuTools.addAction(action)
+    study_menu.addAction(action)
     mw._slovo_study_action = action
+    settings_menu = study_menu.addMenu('Настройки')
+    service_menu = study_menu.addMenu('Обслуживание')
     wallpaper = QAction('Обои · время суток…', mw)
     wallpaper.triggered.connect(choose_wallpaper)
-    mw.form.menuTools.addAction(wallpaper)
+    settings_menu.addAction(wallpaper)
     mw._slovo_wallpaper_action = wallpaper
     signal = QAction('Проверить сигнал окончания блока…', mw)
     signal.triggered.connect(lambda: ensure_study().phase_notice.present({'id': 'demo', 'kind': 'break'}, demo=True))
-    mw.form.menuTools.addAction(signal)
+    service_menu.addAction(signal)
     mw._slovo_signal_action = signal
     archive = QAction('Архивировать текущие колоды…', mw)
     archive.triggered.connect(archive_decks)
-    mw.form.menuTools.addAction(archive)
+    service_menu.addAction(archive)
     mw._slovo_archive_action = archive
     restore = QAction('Вернуть колоды из архива…', mw)
     restore.triggered.connect(restore_decks)
-    mw.form.menuTools.addAction(restore)
+    service_menu.addAction(restore)
     mw._slovo_restore_action = restore
     ensure_study()
     for text, name, callback in (
@@ -1726,7 +1759,10 @@ def loaded():
     ):
         extra = QAction(text, mw)
         extra.triggered.connect(callback)
-        mw.form.menuTools.addAction(extra)
+        if name == '_slovo_repair_action':
+            study_menu.insertAction(settings_menu.menuAction(), extra)
+        else:
+            service_menu.addAction(extra)
         setattr(mw, name, extra)
     mw._slovo_review_health = ReviewHealth()
     mw._slovo_review_health.refresh(setup=True)
@@ -1798,11 +1834,11 @@ def loaded():
                 bridge.save_preferences(PREFS, dock.preferences)
                 update_home_widget()
             track_apps.toggled.connect(toggle_tracking)
-            mw.form.menuTools.addAction(track_apps)
+            settings_menu.addAction(track_apps)
             mw._slovo_tracking_action = track_apps
             details_action = QAction('Детализация сайтов и приложений…', mw)
             details_action.triggered.connect(configure_activity_details)
-            mw.form.menuTools.addAction(details_action)
+            settings_menu.addAction(details_action)
             mw._slovo_details_action = details_action
         except Exception as error:
             dock.usage_error = str(error)
@@ -1818,7 +1854,7 @@ def loaded():
                 dock.preferences['menu_timer_visible'] = checked
                 bridge.save_preferences(PREFS, dock.preferences)
             menu_timer.toggled.connect(toggle)
-            mw.form.menuTools.addAction(menu_timer)
+            settings_menu.addAction(menu_timer)
             mw._slovo_menu_timer_action = menu_timer
         except Exception as error:
             dock.message.setText('Таймер в строке меню недоступен: ' + str(error))
@@ -1863,6 +1899,12 @@ def unloaded():
             mw.form.menuTools.removeAction(extra)
             extra.deleteLater()
             setattr(mw, name, None)
+
+    menu = getattr(mw, '_slovo_study_menu', None)
+    if menu:
+        mw.form.menuTools.removeAction(menu.menuAction())
+        menu.deleteLater()
+        mw._slovo_study_menu = None
 
 
 gui_hooks.profile_will_close.append(unloaded)
@@ -1972,7 +2014,7 @@ HOME_SCRIPT = r'''
  el.querySelector('.sf-task').textContent = s.title;
  el.querySelector('.sf-fill').style.width = Math.min((s.seriesTotal?(s.seriesIndex-1)/s.seriesTotal:s.count/5)*100,100)+'%';
  el.querySelector('.sf-sub').textContent = s.subtitle;
- el.querySelector('button').textContent = s.awaitingRest?'Начать отдых →':s.readyNext?'Я вернулся →':s.active ? 'Открыть управление →' : 'Настроить блок →';
+ el.querySelector('button').textContent = s.awaitingRest?'Начать отдых →':s.readyNext?'Я вернулся →':s.active ? 'Открыть фокус →' : 'Выбрать задачи →';
  const grid = document.querySelector('.unified-grid');
  if (grid) {
   let tasks = document.getElementById('slovo-home-tasks');
@@ -2169,7 +2211,7 @@ def archive_decks():
         return bridge.archive_collection(col, PREFS.parent / 'backups')
     def done(count):
         mw.reset()
-        showInfo(f'Старые колоды скрыты, {count} карточек исключены из повторений.\nКарточки и история сохранены. Восстановление: Инструменты → Вернуть колоды из архива.')
+        showInfo(f'Старые колоды скрыты, {count} карточек исключены из повторений.\nКарточки и история сохранены. Восстановление: Инструменты → Фокус и учёба → Обслуживание → Вернуть колоды из архива.')
     QueryOp(parent=mw, op=work, success=done).with_progress('Архивируем колоды…').run_in_background()
 
 
