@@ -48,12 +48,89 @@ func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
     return value
 }
+enum PreviewLocation {
+    case empty
+    case page(String)
+    case unreadable
+}
+
+func webAddress(_ element: AXUIElement, _ name: String) -> String? {
+    guard let value = attribute(element, name) else { return nil }
+    if let url = value as? URL { return url.absoluteString }
+    if let text = value as? String, URL(string: text)?.scheme != nil { return text }
+    return nil
+}
+
+func previewLocation(_ window: AXUIElement) -> PreviewLocation {
+    if let document = webAddress(window, "AXDocument") { return .page(document) }
+    // Inspect accessibility roles and the document URL only. Stop at the web
+    // area: do not enumerate page elements or read their text or values.
+    var queue: [(AXUIElement, Int)] = [(window, 0)]
+    var index = 0
+    while index < queue.count && index < 500 {
+        let (element, depth) = queue[index]
+        index += 1
+        if (attribute(element, kAXRoleAttribute) as? String) == "AXWebArea" {
+            if let url = webAddress(element, "AXURL") { return .page(url) }
+            return .unreadable
+        }
+        if depth < 12, let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement] {
+            queue.append(contentsOf: children.map { ($0, depth + 1) })
+        }
+    }
+    // A new Little Arc command window has no document yet. Leave it open.
+    return index >= 500 ? .unreadable : .empty
+}
+
+func blockedPreviewURL(_ value: String) -> Bool {
+    guard let parsed = URLComponents(string: value), let rawHost = parsed.host else { return false }
+    let host = rawHost.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+    let blocked = ["youtube.com", "youtu.be", "youtube-nocookie.com", "googlevideo.com", "ytimg.com",
+                   "instagram.com", "cdninstagram.com", "ig.me", "x.com", "twitter.com", "twimg.com",
+                   "web.telegram.org", "t.me", "telegram.me", "tiktok.com", "tiktokv.com", "tiktokcdn.com",
+                   "musical.ly", "vkvideo.ru", "video.vk.com"]
+    if blocked.contains(where: { host == $0 || host.hasSuffix("." + $0) }) { return true }
+    let isGoogle = host.range(of: #"^(?:[a-z0-9-]+\.)*google\.(?:[a-z]{2,3}|(?:co|com)\.[a-z]{2})$"#, options: .regularExpression) != nil
+    guard isGoogle else { return false }
+    if ["/videohp", "/video", "/videos"].contains(parsed.path.trimmingCharacters(in: CharacterSet(charactersIn: "/" )).isEmpty ? "/" : "/" + parsed.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))) { return true }
+    var query = parsed.queryItems ?? []
+    if let fragment = parsed.fragment,
+       let items = URLComponents(string: "https://preview.invalid/?" + fragment)?.queryItems { query += items }
+    return query.contains { item in
+        (item.name == "vld") ||
+        (item.name == "fpstate" && ["ive", "v"].contains(item.value ?? "")) ||
+        (["tbm", "udm"].contains(item.name) && ["vid", "vids", "7"].contains(item.value ?? ""))
+    }
+}
+
+func mustClose(_ window: AXUIElement) -> Bool {
+    switch previewLocation(window) {
+    case .empty: return false
+    case .page(let url): return blockedPreviewURL(url)
+    case .unreadable: return true
+    }
+}
+
+if CommandLine.arguments.contains("--self-test") {
+    let denied = ["https://youtube.com/watch?v=abcdefghijk", "https://www.youtube.com/", "https://youtu.be/abcdefghijk",
+                  "https://youtube-nocookie.com/embed/abcdefghijk", "https://m.instagram.com/", "https://x.com/",
+                  "https://web.telegram.org/k/", "https://vm.tiktok.com/a", "https://vkvideo.ru/video1",
+                  "https://www.google.com/search?q=test#fpstate=ive&vld=vid:abcdefghijk", "https://www.google.ru/search?udm=7", "https://www.google.com/videohp"]
+    let allowed = ["https://example.com/", "https://en.wikipedia.org/wiki/Learning", "https://www.google.com/search?q=lecture",
+                   "https://docs.google.com/document/d/example", "https://github.com/", "about:blank",
+                   "https://example.com/youtube.com", "https://youtube.com.example.org/", "https://example.com/?q=x.com", "https://google.com.example.org/search?udm=7"]
+    for url in denied { precondition(blockedPreviewURL(url), "Forbidden preview was allowed: " + url) }
+    for url in allowed { precondition(!blockedPreviewURL(url), "Ordinary preview was denied: " + url) }
+    emit(["ok": true, "url_cases": denied.count + allowed.count])
+}
+
 let request = CommandLine.arguments.contains("--request-permission")
 let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: request] as CFDictionary
 let trusted = AXIsProcessTrustedWithOptions(options)
 if request { emit(["trusted": trusted]) }
-guard trusted else { emit(["ok": false, "error": "Focus Window Guard needs Accessibility permission"], status: 2) }
+guard trusted else { emit(["ok": false, "error": "Focus Link Guard needs Accessibility permission"], status: 2) }
 var closed = 0
+var allowed = 0
 for app in NSRunningApplication.runningApplications(withBundleIdentifier: "company.thebrowser.Browser") {
     let process = AXUIElementCreateApplication(app.processIdentifier)
     guard let windows = attribute(process, kAXWindowsAttribute) as? [AXUIElement] else {
@@ -63,6 +140,7 @@ for app in NSRunningApplication.runningApplications(withBundleIdentifier: "compa
     for window in windows {
         guard let identifier = attribute(window, "AXIdentifier") as? String,
               identifier.hasPrefix("littleBrowserWindow-") else { continue }
+        if !mustClose(window) { allowed += 1; continue }
         guard let control = attribute(window, kAXCloseButtonAttribute),
               CFGetTypeID(control) == AXUIElementGetTypeID() else {
             emit(["ok": false, "error": "Little Arc has no native close control"], status: 4)
@@ -80,9 +158,9 @@ for app in NSRunningApplication.runningApplications(withBundleIdentifier: "compa
     }
     for window in remaining {
         if let identifier = attribute(window, "AXIdentifier") as? String,
-           identifier.hasPrefix("littleBrowserWindow-") {
-            emit(["ok": false, "error": "Little Arc preview is still open"], status: 7)
+           identifier.hasPrefix("littleBrowserWindow-"), mustClose(window) {
+            emit(["ok": false, "error": "Forbidden Little Arc preview is still open"], status: 7)
         }
     }
 }
-emit(["ok": true, "closed": closed])
+emit(["ok": true, "closed": closed, "allowed": allowed])

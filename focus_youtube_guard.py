@@ -301,8 +301,8 @@ def user_script(script):
 def guard_arc_previews():
     if not (BASE / 'arc-preview-guard-required').exists():
         return
-    executable = Path('/Applications/Focus Window Guard.app/Contents/MacOS/FocusWindowGuard')
-    identity_path = BASE / 'arc-preview-guard-identity.json'
+    executable = Path('/Applications/Focus Link Guard.app/Contents/MacOS/FocusWindowGuard')
+    identity_path = BASE / 'arc-preview-link-guard-identity.json'
     identity_info = identity_path.lstat()
     executable_info = executable.lstat()
     if (not stat.S_ISREG(identity_info.st_mode) or identity_info.st_uid != 0 or identity_info.st_mode & 0o022 or
