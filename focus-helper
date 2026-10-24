@@ -162,10 +162,17 @@ def enforce_permanent_text(text):
 
 
 @contextlib.contextmanager
-def locked():
+def locked(blocking=True):
     with (BASE / 'lock').open('a') as file:
-        fcntl.flock(file, fcntl.LOCK_EX)
-        yield
+        try:
+            fcntl.flock(file, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(file, fcntl.LOCK_UN)
 
 
 def write_hosts(text):
@@ -576,11 +583,20 @@ def main():
         request = json.loads(sys.stdin.read(4096))
     if args in (['study-start'], ['study-break-start'], ['study-break-shorten'], ['study-next-ready'], ['study-next-update'], ['study-next-start'], ['study-emergency-request'], ['study-emergency-confirm']):
         request = json.loads(sys.stdin.read(32768))
+    if args == ['study-status']:
+        # Browser/Accessibility checks can hold the daemon lock longer than
+        # the Anki request deadline. Atomic study.json replacement lets a
+        # reader use the last complete checkpoint without changing protection.
+        # Only the lock owner may commit timer transitions or create a new ID.
+        with locked(blocking=False) as acquired:
+            value = study_lock.status(boot_identity(), advance_state=acquired)
+        print(json.dumps(dict(value, service_running=timer_running(),
+                              status_refresh_pending=not acquired, supports_task_groups=True,
+                              supports_confirmed_break=True, supports_pomodoro=True,
+                              supports_simple_emergency=True), ensure_ascii=False))
+        return
     with locked():
-        if args == ['study-status']:
-            print(json.dumps(dict(study_status(), service_running=timer_running(), supports_task_groups=True,
-                                  supports_confirmed_break=True, supports_pomodoro=True, supports_simple_emergency=True), ensure_ascii=False))
-        elif args == ['study-start']:
+        if args == ['study-start']:
             print(json.dumps(start_study(request), ensure_ascii=False))
         elif args == ['study-break-start']:
             print(json.dumps(study_lock.start_break(request, boot_identity()), ensure_ascii=False))

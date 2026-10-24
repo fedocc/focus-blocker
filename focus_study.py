@@ -1,4 +1,4 @@
-"""Protected study blocks. Callers must hold the helper's existing file lock.
+"""Protected study blocks. Mutating callers must hold the helper's file lock.
 
 No UI state, planner file or Anki configuration is an authority after start.
 All durations and emergency rules live in this root-owned module.
@@ -246,12 +246,28 @@ def shorten_break(request, boot, now=None, mono=None):
     return {'session': copy.deepcopy(value['session']), 'shortened': True}
 
 
-def status(boot, now=None, mono=None):
+def status(boot, now=None, mono=None, *, advance_state=True):
     now = time.time() if now is None else now
     mono = clock() if mono is None else mono
     value = read()
-    if advance(value, now, mono, boot):
-        save(value)
+    if advance_state:
+        if advance(value, now, mono, boot):
+            save(value)
+    elif value['session']:
+        # Project only the display clock from the last atomic checkpoint.
+        # Keep its committed phase/ID even past a deadline: a busy observer
+        # cannot invent a new focus block or release mandatory rest. The next
+        # locked action/daemon pass remains the authority for all transitions.
+        session = value['session']
+        if session['boot'] != boot:
+            session['deadline_mono'] = mono + session['remaining']
+            if session.get('awaiting_rest'):
+                session['overtime_anchor_mono'] = mono
+        session['remaining'] = max(0, session['deadline_mono'] - mono)
+        session['ends_at'] = now + session['remaining']
+        if session.get('awaiting_rest'):
+            session['overtime_seconds'] += max(0, mono - session['overtime_anchor_mono'])
+            session['overtime_anchor_mono'] = mono
     records = [item for item in value['history'] if day_at(item['ended_at']) == day_at(now)]
     if value['session'] and value['session']['phase'] == 'focus':
         records.append(value['session'])
