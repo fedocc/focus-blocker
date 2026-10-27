@@ -89,6 +89,17 @@ class PolicyAndMigrationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             install.tiktok_hosts_block('# >>> block-tiktok\n', socials.TIKTOK_HOSTS)
 
+    def test_tiktok_migration_preserves_inactive_study_block(self):
+        study = '# === FOCUS_BLOCK:STUDY_WEB START ===\n# TEMP_FOCUS_UNLOCK 127.0.0.1 tiktok.com\n# TEMP_FOCUS_UNLOCK ::1 tiktok.com\n# === FOCUS_BLOCK:STUDY_WEB END ===\n'
+        original = '# >>> block-tiktok\n0.0.0.0 tiktok.com\n::1 tiktok.com\n# <<< block-tiktok\n' + study
+        changed = install.tiktok_hosts_block(original, socials.TIKTOK_HOSTS)
+        self.assertIn(study, changed)
+        block = changed.split('# === FOCUS_BLOCK:TIKTOK START ===', 1)[1].split('# === FOCUS_BLOCK:TIKTOK END ===', 1)[0]
+        self.assertNotIn('TEMP_', block)
+        for domain in socials.TIKTOK_HOSTS:
+            for address in ('127.0.0.1', '::1'):
+                self.assertIn(address + ' ' + domain, block.splitlines())
+
 
 class InstallationTests(unittest.TestCase):
     def setUp(self):
