@@ -399,7 +399,7 @@ def _browser_report(strict_unsupported=True, only_browser=None):
             'set tabIndex to tabIndex + 1',
             'set tabUrl to (URL of t) as text',
             'set tabId to ' + ('(id of t) as text' if kind == 'id' else 'tabIndex as text'),
-            'if tabUrl contains "youtube.com" or tabUrl contains "youtu.be" or tabUrl contains "youtube-nocookie.com" or tabUrl contains "instagram.com" or tabUrl contains "cdninstagram.com" or tabUrl contains "ig.me" or tabUrl contains "web.telegram.org" or tabUrl contains "t.me" or tabUrl contains "telegram.me" or tabUrl contains "google." or tabUrl contains "x.com" or tabUrl contains "twitter.com" or tabUrl contains "twimg.com" then',
+            'if tabUrl contains "tiktok" or tabUrl contains "musical.ly" or tabUrl contains "byteoversea.com" or tabUrl contains "ibytedtos.com" or tabUrl contains "ibyteimg.com" or tabUrl contains "youtube.com" or tabUrl contains "youtu.be" or tabUrl contains "youtube-nocookie.com" or tabUrl contains "instagram.com" or tabUrl contains "cdninstagram.com" or tabUrl contains "ig.me" or tabUrl contains "web.telegram.org" or tabUrl contains "t.me" or tabUrl contains "telegram.me" or tabUrl contains "google." or tabUrl contains "x.com" or tabUrl contains "twitter.com" or tabUrl contains "twimg.com" then',
             'set reportText to reportText & "T" & sep & ' + quoted + ' & sep & windowId & sep & tabId & sep & tabUrl & linefeed',
             'end if',
             'end repeat',

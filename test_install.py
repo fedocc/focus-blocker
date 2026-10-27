@@ -56,10 +56,11 @@ class PolicyAndMigrationTests(unittest.TestCase):
     def test_sudo_exception_has_exact_scope_and_all_guard_commands(self):
         rule = install.sudoers_text('focus_test')
         commands = rule.split('NOPASSWD: ')[1].strip().split(', ')
-        self.assertEqual(len(commands), 20)
+        self.assertEqual(len(commands), 21)
         self.assertIn(str(install.BASE / 'focus-helper') + ' study-break-shorten', commands)
         self.assertIn(str(install.BASE / 'focus-helper') + ' study-break-start', commands)
         self.assertIn(str(install.BASE / 'focus-helper') + ' lease x', commands)
+        self.assertIn(str(install.BASE / 'focus-helper') + ' lease tiktok', commands)
         self.assertIn(str(install.BASE / 'focus-helper') + ' youtube-duration', commands)
         self.assertFalse(any('*' in c or c.endswith(' daemon') or 'vkvideo' in c for c in commands))
 
@@ -74,6 +75,19 @@ class PolicyAndMigrationTests(unittest.TestCase):
         for value in ('# === FOCUS_BLOCK:X START ===\n', '# === FOCUS_BLOCK:X END ===\n# === FOCUS_BLOCK:X START ===\n'):
             with self.assertRaises(RuntimeError):
                 install.hosts_block(value, 'X', socials.X_HOSTS)
+
+
+    def test_legacy_tiktok_hosts_migration_starts_blocked_and_preserves_other_sites(self):
+        original = '127.0.0.1 localhost\n# >>> block-tiktok\n# TEMP_TIKTOK_HOUR 0.0.0.0 tiktok.com\n::1 vm.tiktok.com\n# <<< block-tiktok\n127.0.0.1 unrelated.example\n'
+        changed = install.tiktok_hosts_block(original, socials.TIKTOK_HOSTS)
+        self.assertNotIn('block-tiktok', changed)
+        self.assertNotIn('TEMP_TIKTOK_HOUR', changed)
+        self.assertIn('127.0.0.1 tiktok.com\n', changed)
+        self.assertIn('::1 vm.tiktok.com\n', changed)
+        self.assertIn('127.0.0.1 unrelated.example\n', changed)
+        self.assertEqual(install.tiktok_hosts_block(changed, socials.TIKTOK_HOSTS), changed)
+        with self.assertRaises(RuntimeError):
+            install.tiktok_hosts_block('# >>> block-tiktok\n', socials.TIKTOK_HOSTS)
 
 
 class InstallationTests(unittest.TestCase):
@@ -107,11 +121,22 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(guard.read_policy()['channels'], POLICY['channels'])
         self.assertEqual(guard.read_usage(), {'last_regular_opened_at': None, 'counts': {}})
         self.assertEqual(socials.read_usage(), {'schema_version': 1, 'services': {}})
-        for name in ('focus-open', 'youtube', 'instagram', 'x', 'telegram'):
+        for name in ('focus-open', 'youtube', 'instagram', 'x', 'telegram', 'tiktok'):
             self.assertTrue((self.home/'.local/bin'/name).exists())
         self.assertIn('lease x', self.rule.read_text())
         self.assertIn('FOCUS_BLOCK:X START', self.hosts.read_text())
         self.assertIn('127.0.0.1 unrelated.example', self.hosts.read_text())
+
+    def test_upgrade_retires_legacy_tiktok_timer_and_does_not_open_tiktok(self):
+        legacy = self.plist.with_name('local.focus-open.tiktok-hour-20261017.plist')
+        legacy.write_text('legacy timer')
+        self.hosts.write_text(self.hosts.read_text()+'# >>> block-tiktok\n0.0.0.0 tiktok.com\n# <<< block-tiktok\n')
+        install.main()
+        self.assertFalse(legacy.exists())
+        self.assertNotIn('block-tiktok',self.hosts.read_text())
+        self.assertIn('127.0.0.1 tiktok.com\n',self.hosts.read_text())
+        self.assertFalse((self.base/'lease.json').exists())
+        self.assertTrue((self.home/'.local/bin/tiktok').exists())
 
     def test_reinstall_keeps_existing_protected_quotas_and_client_history_byte_for_byte(self):
         (self.base/'youtube-policy.json').write_text(json.dumps(POLICY))

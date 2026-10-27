@@ -164,7 +164,7 @@ class DailyPolicyTests(unittest.TestCase):
         last=dt.datetime(2026,10,13,0,4,tzinfo=socials.TIMEZONE).timestamp()
         later=dt.datetime(2026,10,13,23,59,tzinfo=socials.TIMEZONE).timestamp()
         tomorrow=dt.datetime(2026,10,14,0,0,tzinfo=socials.TIMEZONE).timestamp()
-        for service,seconds in (('instagram',120),('x',120),('telegram',420)):
+        for service,seconds in (('instagram',120),('x',120),('telegram',420),('tiktok',300)):
             usage=socials.reserve(service,{'schema_version':1,'services':{}},last)
             with self.assertRaisesRegex(RuntimeError,'сегодня'):socials.validate(service,seconds,usage,later)
             socials.validate(service,seconds,usage,tomorrow)
@@ -779,6 +779,23 @@ class RootIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(helper.read_lease())
         self.assertEqual(guard.read_usage()['counts'][OTHER],1)
 
+    def test_tiktok_fixed_daily_lease_expires_without_closing_lectures(self):
+        (self.base/'no-manual-overrides').touch()
+        for seconds in (60, 301, 3600):
+            with self.assertRaises(RuntimeError): helper.lease('tiktok', seconds)
+        helper.lease('tiktok', 300)
+        current=helper.read_lease()
+        self.assertEqual(current['deadline']-current['started_at'],300)
+        lecture='https://www.youtube.com/watch?v='+VIDEO
+        self.report.side_effect=[self.tabs(lecture,'https://www.tiktok.com/@test'),self.tabs(lecture)]
+        current['deadline']=time.time()-1
+        guard.atomic_json(helper.STATE,current)
+        helper.expire()
+        self.assertIsNone(helper.read_lease())
+        self.assertEqual([t['url'] for t in self.close.call_args.args[0]],['https://www.tiktok.com/@test'])
+        self.force.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError,'сегодня'): helper.lease('tiktok',300)
+
     def test_x_grants_two_minutes_then_refuses_a_second_daily_grant(self):
         helper.lease('x',120)
         self.assertEqual(helper.read_lease()['service'],'x')
@@ -1123,6 +1140,15 @@ class ClientIntegrationTests(unittest.TestCase):
         self.assertEqual(rpc.call_args.args,('lease','youtube',{'video_id':OTHER,'seconds':720}))
         self.assertIn(client.youtube_course_entry(COURSE),output.getvalue())
         self.assertIn('Автоблокировка:',output.getvalue())
+
+    def test_tiktok_cli_requests_only_five_minutes_without_link_prompt(self):
+        with patch.object(client,'helper_command') as command,patch.object(client,'helper_json',return_value={}),patch.object(client,'prompt_text',side_effect=AssertionError('unexpected link prompt')):
+            self.assertEqual(client.main(['tiktok']),0)
+        self.assertEqual(command.call_args.args,('lease','tiktok','300'))
+        self.open.assert_called_once_with('https://www.tiktok.com/','Arc')
+        self.assertEqual(client.load_state()['history'][-1]['duration_seconds'],300)
+        self.assertTrue(client.validate_url('tiktok','https://www.tiktok.com/@example').allowed)
+        self.assertFalse(client.validate_url('tiktok','https://tiktok.com.evil.test/').allowed)
 
     def test_x_cli_opens_home_without_prompt_and_records_two_minute_window(self):
         with patch.object(client,'helper_command') as command,patch.object(client,'helper_json',return_value={}),patch.object(client,'prompt_text',side_effect=AssertionError('unexpected link prompt')):

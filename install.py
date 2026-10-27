@@ -57,6 +57,23 @@ def hosts_block(text, name, domains):
     return text + ('\n' if text.endswith('\n') else '\n\n') + block
 
 
+def tiktok_hosts_block(text, domains):
+    """Fold the retired timer's block into the ordinary, initially blocked one."""
+    start, end = '# >>> block-tiktok', '# <<< block-tiktok'
+    if start in text or end in text:
+        if text.count(start) != 1 or text.count(end) != 1 or text.index(end) < text.index(start):
+            raise RuntimeError('Legacy TikTok block missing or ambiguous')
+        a, b = text.index(start), text.index(end) + len(end)
+        prior = []
+        for line in text[a:b].splitlines():
+            match = re.match(r'^(?:# TEMP_(?:TIKTOK_HOUR|FOCUS_UNLOCK) )?(?:127\.0\.0\.1|0\.0\.0\.0|::1)\s+([a-zA-Z0-9.-]+)\s*$', line.strip())
+            if match:
+                prior.append(match[1])
+        domains = tuple(dict.fromkeys(tuple(domains) + tuple(prior)))
+        text = text[:a] + text[b:]
+    return hosts_block(text, 'TIKTOK', domains)
+
+
 def merge_policy(existing, incoming):
     if existing is None:
         return copy.deepcopy(incoming)
@@ -116,7 +133,7 @@ def migrate_youtube_usage(state):
 
 def sudoers_text(username):
     helper = str(BASE / 'focus-helper')
-    commands = ('check', 'restore', 'stop', 'lease youtube', 'lease instagram', 'lease x', 'lease telegram',
+    commands = ('check', 'restore', 'stop', 'lease youtube', 'lease instagram', 'lease x', 'lease telegram', 'lease tiktok',
                 'guard-check', 'youtube-status', 'youtube-policy', 'youtube-duration',
                 'study-start', 'study-status', 'study-break-start', 'study-break-shorten', 'study-next-ready', 'study-next-update', 'study-next-start', 'study-emergency-request', 'study-emergency-confirm')
     return username + ' ALL=(root) NOPASSWD: ' + ', '.join(helper + ' ' + c for c in commands) + '\n'
@@ -218,6 +235,8 @@ def main(install_anki=False, stop_current_study=False):
     backup.mkdir(mode=0o700)
     old = {}
     label = 'system/local.focus-open.timer'
+    legacy_tiktok = PLIST.with_name('local.focus-open.tiktok-hour-20261017.plist')
+    legacy_retired = False
     with (BASE / 'lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if (BASE / 'lease.json').exists():
@@ -236,11 +255,13 @@ def main(install_anki=False, stop_current_study=False):
             addon.mkdir(mode=0o700, exist_ok=True)
             os.chown(addon, user.pw_uid, user.pw_gid)
         destinations = [BASE / name for name in ROOT_FILES] + [BASE / name for name in ('config.json', 'youtube-policy.json', 'youtube-usage.json', 'service-usage.json')] + [HOSTS, PLIST, RULE, client]
+        if legacy_tiktok.exists():
+            destinations.append(legacy_tiktok)
         if stop_current_study:
             destinations.append(BASE / 'study.json')
         if addon:
             destinations += [addon / name for name in ANKI_FILES]
-        launchers = ('focus-open', 'youtube', 'instagram', 'x', 'telegram')
+        launchers = ('focus-open', 'youtube', 'instagram', 'x', 'telegram', 'tiktok')
         destinations += [local / 'bin' / name for name in launchers]
         for path in destinations:
             if path.is_symlink():
@@ -254,6 +275,10 @@ def main(install_anki=False, stop_current_study=False):
         root_json(backup / 'metadata.json', {str(p): {'mode': v[1], 'uid': v[2], 'gid': v[3]} if v else None for p, v in old.items()})
         subprocess.run(['/bin/launchctl', 'bootout', label], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
+            if legacy_tiktok.exists():
+                subprocess.run(['/bin/launchctl', 'bootout', 'system/local.focus-open.tiktok-hour-20261017'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                legacy_tiktok.unlink()  # Recoverable from the installation backup.
+                legacy_retired = True
             for name in ROOT_FILES:
                 replace(BASE / name, (SOURCE / name).read_bytes(), 0o755 if name == 'focus-helper' else 0o644)
             sys.path.insert(0, str(BASE))
@@ -276,6 +301,7 @@ def main(install_anki=False, stop_current_study=False):
             if stop_current_study and study.STATE.exists():
                 study.save(interrupt_for_repair(study.read(), time.time()))
             text = HOSTS.read_text()
+            text = tiktok_hosts_block(text, socials.TIKTOK_HOSTS)
             for name, domains in (('YOUTUBE', YOUTUBE_DOMAINS), ('INSTAGRAM', INSTAGRAM_DOMAINS), ('X', socials.X_HOSTS), ('TELEGRAM', TELEGRAM_DOMAINS), ('VKVIDEO', VKVIDEO_DOMAINS)):
                 text = hosts_block(text, name, domains)
             text = hosts_block(text, 'STUDY_WEB', study.DISTRACTION_DOMAINS)
@@ -304,6 +330,8 @@ def main(install_anki=False, stop_current_study=False):
                     replace(path, *prior)
                 else:
                     path.unlink(missing_ok=True)
+            if legacy_retired and legacy_tiktok.exists():
+                subprocess.run(['/bin/launchctl', 'bootstrap', 'system', str(legacy_tiktok)], check=False)
             if PLIST.exists():
                 subprocess.run(['/bin/launchctl', 'bootstrap', 'system', str(PLIST)], check=False)
             raise
@@ -323,7 +351,7 @@ def main(install_anki=False, stop_current_study=False):
         with shell.open('a') as stream:
             stream.write('\n' + line + '\n')
         os.chown(shell, user.pw_uid, user.pw_gid)
-    print('Installed: youtube, instagram, x, telegram. Daily reset: midnight Europe/Moscow.')
+    print('Installed: youtube, instagram, x, telegram, tiktok. Daily reset: midnight Europe/Moscow.')
     print('Approve macOS Automation requests for your browser if prompted. Restart Terminal for new commands.')
     print('Backup: ' + str(backup))
     if addon:

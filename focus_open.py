@@ -34,7 +34,7 @@ YOUTUBE_METADATA_TIMEOUT_SECONDS = 12
 YOUTUBE_MAX_ACCESS_SECONDS = 90 * 60
 MANUAL_MAX_SECONDS = 30 * 60
 DEFAULT_BROWSER_APP = "Arc"
-BROWSER_GUARD_SERVICES = {"youtube", "instagram", "x"}
+BROWSER_GUARD_SERVICES = {"youtube", "instagram", "x", "tiktok"}
 MIN_REASON_CHARS = 12
 MIN_REASON_WORDS = 5
 BROWSER_MONITOR_GRACE_SECONDS = 12
@@ -45,8 +45,10 @@ TELEGRAM_DEFAULT_MINUTES = 7
 INSTAGRAM_URL = "https://www.instagram.com/"
 INSTAGRAM_ACCESS_SECONDS = 2 * 60
 X_URL = "https://x.com/"
+TIKTOK_URL = "https://www.tiktok.com/"
+SHORT_SOCIAL_SECONDS = {"instagram": 120, "x": 120, "tiktok": 300}
 DAILY_TIMEZONE = ZoneInfo("Europe/Moscow")
-SHORT_SOCIAL_HOMES = {"instagram": INSTAGRAM_URL, "x": X_URL}
+SHORT_SOCIAL_HOMES = {"instagram": INSTAGRAM_URL, "x": X_URL, "tiktok": TIKTOK_URL}
 CONTENT_LIMITS = {"youtube": 2}
 HELPER_PATH = Path("/Library/PrivilegedHelperTools/focus-open/focus-helper")
 YOUTUBE_POLICY_PATH = HELPER_PATH.parent / "youtube-policy.json"
@@ -79,6 +81,7 @@ class HostsBlockError(FocusOpenError):
 
 
 SERVICES: dict[str, ServiceConfig] = {
+    "tiktok": ServiceConfig("tiktok", "TikTok", "TIKTOK", "", ("tiktok.com", "www.tiktok.com", "m.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"), cooldown_seconds=0),
     "telegram": ServiceConfig("telegram", "Telegram Web", "TELEGRAM", "", ("web.telegram.org",), cooldown_seconds=0),
     "youtube": ServiceConfig(
         key="youtube",
@@ -225,7 +228,7 @@ def validate_url(service_key: str, raw_url: str) -> UrlValidation:
     if service_key in SHORT_SOCIAL_HOMES:
         if host not in SERVICES[service_key].allowed_domains:
             return UrlValidation(False, url, "Это не разрешенный домен " + SERVICES[service_key].display_name + ".")
-        return UrlValidation(True, url, access_seconds=INSTAGRAM_ACCESS_SECONDS)
+        return UrlValidation(True, url, access_seconds=SHORT_SOCIAL_SECONDS[service_key])
 
     return UrlValidation(False, url, f"Неизвестный сервис: {service_key}")
 
@@ -470,7 +473,7 @@ def ask_manual_duration_seconds(max_seconds: int = MANUAL_MAX_SECONDS) -> int:
 
 def compute_access_seconds(service_key: str, url: str, validation: UrlValidation, youtube_duration: int | None = None) -> int:
     if service_key in SHORT_SOCIAL_HOMES:
-        return INSTAGRAM_ACCESS_SECONDS
+        return SHORT_SOCIAL_SECONDS[service_key]
     if service_key != "youtube":
         raise FocusOpenError(f"Неизвестный сервис: {service_key}")
 
@@ -1058,6 +1061,7 @@ def run_service(
     if service_key not in SHORT_SOCIAL_HOMES:
         raise FocusOpenError("Неизвестный сервис.")
     homepage = SHORT_SOCIAL_HOMES[service_key]
+    seconds = SHORT_SOCIAL_SECONDS[service_key]
     if browser_app != DEFAULT_BROWSER_APP or disable_browser_guard:
         raise FocusOpenError("Контроль вкладок обязателен; открытие начинается в Arc.")
     with exclusive_lock():
@@ -1068,16 +1072,16 @@ def run_service(
         helper_command("check")
         helper_json("guard-check")
         # No browser restart: the daemon expires this window and closes only
-        # Instagram tabs, preserving lectures and unrelated browser work.
-        helper_command("lease", service_key, str(INSTAGRAM_ACCESS_SECONDS))
-        append_history(state, service_key, homepage, "", INSTAGRAM_ACCESS_SECONDS, current_time, None)
+        # expired service tabs, preserving lectures and unrelated browser work.
+        helper_command("lease", service_key, str(seconds))
+        append_history(state, service_key, homepage, "", seconds, current_time, None)
         state["history"][-1]["access_granted"] = True
         state["active_unlock"] = {"service": service_key, "url": homepage,
                                   "started_at": current_time.isoformat(),
-                                  "ends_at": (current_time + dt.timedelta(seconds=INSTAGRAM_ACCESS_SECONDS)).isoformat()}
+                                  "ends_at": (current_time + dt.timedelta(seconds=seconds)).isoformat()}
         save_state(state)
         open_url(homepage, browser_app)
-        print(SERVICES[service_key].display_name + " открыт на 2 минуты. Следующий доступ — после полуночи по Москве.")
+        print(SERVICES[service_key].display_name + f" открыт на {format_duration(seconds)}. Следующий доступ — после полуночи по Москве.")
     return 0
 
 
@@ -1177,6 +1181,7 @@ def print_install_zsh() -> int:
     print(f"alias youtube='python3 {script_path} youtube'")
     print(f"alias telegram='python3 {script_path} telegram'")
     print(f"alias instagram='python3 {script_path} instagram'")
+    print(f"alias tiktok='python3 {script_path} tiktok'")
     print(f"alias x='python3 {script_path} x'")
     print(f"alias social-open='python3 {script_path} open'")
     return 0
@@ -1203,7 +1208,7 @@ def build_parser() -> argparse.ArgumentParser:
     youtube_parser.add_argument("--no-browser-reopen", action="store_true")
     youtube_parser.add_argument("--url-monitor", action="store_true")
 
-    for key in ("instagram", "x"):
+    for key in SHORT_SOCIAL_HOMES:
         social_parser = subparsers.add_parser(key)
         social_parser.add_argument("--browser-app", default=DEFAULT_BROWSER_APP)
         social_parser.add_argument("--no-browser-guard", action="store_true")
@@ -1234,7 +1239,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == 'stop':
             return stop_command()
-        if args.command in ('youtube', 'instagram', 'x', 'telegram') and args.stop:
+        if args.command in ('youtube', 'instagram', 'x', 'telegram', 'tiktok') and args.stop:
             return stop_command(args.command)
         if args.command == "telegram":
             return run_telegram(args.set_minutes)

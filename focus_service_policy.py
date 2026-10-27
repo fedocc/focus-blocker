@@ -7,14 +7,18 @@ from zoneinfo import ZoneInfo
 
 BASE = Path('/Library/PrivilegedHelperTools/focus-open')
 USAGE = BASE / 'service-usage.json'
-DURATIONS = {'instagram': 120, 'x': 120, 'telegram': 420}
-SERVICE_NAMES = {'instagram': 'Instagram', 'x': 'X', 'telegram': 'Telegram'}
+DURATIONS = {'instagram': 120, 'x': 120, 'telegram': 420, 'tiktok': 300}
+SERVICE_NAMES = {'instagram': 'Instagram', 'x': 'X', 'telegram': 'Telegram', 'tiktok': 'TikTok'}
 X_HOSTS = ('x.com', 'www.x.com', 'm.x.com', 'mobile.x.com', 'api.x.com',
            'twitter.com', 'www.twitter.com', 'm.twitter.com', 'mobile.twitter.com',
            'api.twitter.com', 'tweetdeck.x.com', 'tweetdeck.twitter.com',
            'platform.twitter.com', 'syndication.twitter.com', 'twimg.com',
            'pbs.twimg.com', 'video.twimg.com', 'abs.twimg.com', 'ton.twimg.com',
            'cdn.syndication.twimg.com')
+TIKTOK_DOMAINS = ('tiktok.com', 'tiktokv.com', 'tiktokcdn.com', 'tiktokcdn-us.com',
+                  'tiktokcdn-eu.com', 'musical.ly', 'byteoversea.com', 'ibytedtos.com', 'ibyteimg.com')
+TIKTOK_HOSTS = tuple(dict.fromkeys(('tiktok.com', 'www.tiktok.com', 'm.tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com') +
+                                  tuple(host for domain in TIKTOK_DOMAINS for host in (domain, 'www.' + domain))))
 TIMEZONE = ZoneInfo('Europe/Moscow')
 
 
@@ -31,7 +35,7 @@ def day_at(now):
 
 def validate(service, seconds, usage, now):
     if service not in DURATIONS or isinstance(seconds, bool) or not isinstance(seconds, int) or seconds != DURATIONS[service]:
-        raise ValueError('Защищённый лимит: Instagram и X 2 минуты, Telegram 7 минут.')
+        raise ValueError('Защищённый лимит: Instagram и X 2 минуты, Telegram 7 минут, TikTok 5 минут.')
     previous = usage['services'].get(service, {})
     last_day = previous.get('last_day')
     if not last_day and previous.get('last_started_at') is not None:
@@ -79,4 +83,6 @@ def service_for_url(value):
         return 'x'
     if any(host == d or host.endswith('.' + d) for d in ('web.telegram.org', 't.me', 'telegram.me')):
         return 'telegram'
+    if any(host == d or host.endswith('.' + d) for d in TIKTOK_DOMAINS):
+        return 'tiktok'
     return None
