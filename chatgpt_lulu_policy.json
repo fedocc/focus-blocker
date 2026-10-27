@@ -1,0 +1,18 @@
+{
+  "product": "LuLu 4.5.3",
+  "mode": "passive; allow unknown connections; do not auto-create rules",
+  "application_code_ids": [
+    "2DC432GLL2/com.openai.codex",
+    "2DC432GLL2/com.openai.codex.helper",
+    "2DC432GLL2/com.openai.codex.helper.renderer"
+  ],
+  "domain_regex": "(?i)^(?:https?://)?(?:[a-z0-9_-]+\\.)*(?:youtube\\.com|youtu\\.be|youtube\\-nocookie\\.com|googlevideo\\.com|ytimg\\.com|youtubei\\.googleapis\\.com|instagram\\.com|cdninstagram\\.com|ig\\.me|x\\.com|twitter\\.com|twimg\\.com|web\\.telegram\\.org|t\\.me|telegram\\.me|tiktok\\.com|tiktokv\\.com|tiktokcdn\\.com|tiktokcdn\\-us\\.com|tiktokcdn\\-eu\\.com|musical\\.ly|vkvideo\\.ru|video\\.vk\\.com)\\.?(?::[0-9]+)?(?:[/?#].*)?$",
+  "scope": "Only ChatGPT and its signed network helpers; all ports and protocols",
+  "acceptance_checks": [
+    "Ordinary in-app browser page loads",
+    "Fresh YouTube and Instagram connections blocked, including helper processes",
+    "OpenAI chat and tools continue functioning",
+    "Arc and existing protected Focus policy unchanged"
+  ],
+  "format": "Reference policy for manual LuLu rule creation; not an import file"
+}

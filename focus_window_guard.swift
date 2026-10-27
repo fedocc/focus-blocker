@@ -1,4 +1,4 @@
-// Inspect only Arc's native window identity. Never read web page contents.
+// Inspect Arc's native preview controls and document URLs, never page contents.
 import AppKit
 import ApplicationServices
 import Foundation
@@ -111,6 +111,31 @@ func mustClose(_ window: AXUIElement) -> Bool {
     }
 }
 
+// Peek is a native overlay inside a regular Arc window. Its controls and
+// document are siblings; inspecting the whole window would read the underlying
+// tab's address and could close an unrelated ordinary preview.
+func peekTargets(_ window: AXUIElement) -> [(AXUIElement, AXUIElement?)] {
+    guard let children = attribute(window, kAXChildrenAttribute) as? [AXUIElement] else { return [] }
+    var result: [(AXUIElement, AXUIElement?)] = []
+    for (index, group) in children.enumerated() {
+        // Never descend into a web area: sites cannot supply native controls.
+        guard (attribute(group, kAXRoleAttribute) as? String) == "AXGroup",
+              let controls = attribute(group, kAXChildrenAttribute) as? [AXUIElement] else { continue }
+        let buttons = controls.filter { (attribute($0, kAXRoleAttribute) as? String) == "AXButton" }
+        guard let close = buttons.first(where: { (attribute($0, "AXIdentifier") as? String) == "confirmCloseModal" }),
+              buttons.contains(where: { (attribute($0, "AXIdentifier") as? String) == "openInSpaceExpander" }) else { continue }
+        let next = index + 1 < children.count ? children[index + 1] : nil
+        let content = next.flatMap { (attribute($0, kAXRoleAttribute) as? String) == "AXSplitGroup" ? $0 : nil }
+        result.append((close, content))
+    }
+    return result
+}
+
+func forbiddenPeek(_ content: AXUIElement?) -> Bool {
+    guard let content = content else { return true }
+    return mustClose(content)
+}
+
 if CommandLine.arguments.contains("--self-test") {
     let denied = ["https://youtube.com/watch?v=abcdefghijk", "https://www.youtube.com/", "https://youtu.be/abcdefghijk",
                   "https://youtube-nocookie.com/embed/abcdefghijk", "https://m.instagram.com/", "https://x.com/",
@@ -138,8 +163,19 @@ for app in NSRunningApplication.runningApplications(withBundleIdentifier: "compa
         emit(["ok": false, "error": "Cannot observe Arc native windows"], status: 3)
     }
     for window in windows {
-        guard let identifier = attribute(window, "AXIdentifier") as? String,
-              identifier.hasPrefix("littleBrowserWindow-") else { continue }
+        guard let identifier = attribute(window, "AXIdentifier") as? String else { continue }
+        if identifier.hasPrefix("bigBrowserWindow-") {
+            for (close, content) in peekTargets(window) {
+                if !forbiddenPeek(content) { allowed += 1; continue }
+                let action = AXUIElementPerformAction(close, kAXPressAction as CFString)
+                guard action == .success || action == .invalidUIElement else {
+                    emit(["ok": false, "error": "Arc Peek close action failed", "code": action.rawValue], status: 8)
+                }
+                closed += 1
+            }
+            continue
+        }
+        guard identifier.hasPrefix("littleBrowserWindow-") else { continue }
         if !mustClose(window) { allowed += 1; continue }
         guard let control = attribute(window, kAXCloseButtonAttribute),
               CFGetTypeID(control) == AXUIElementGetTypeID() else {
@@ -157,6 +193,11 @@ for app in NSRunningApplication.runningApplications(withBundleIdentifier: "compa
         emit(["ok": false, "error": "Cannot verify Arc windows"], status: 6)
     }
     for window in remaining {
+        if let identifier = attribute(window, "AXIdentifier") as? String,
+           identifier.hasPrefix("bigBrowserWindow-"),
+           peekTargets(window).contains(where: { forbiddenPeek($0.1) }) {
+            emit(["ok": false, "error": "Forbidden Arc Peek is still open"], status: 9)
+        }
         if let identifier = attribute(window, "AXIdentifier") as? String,
            identifier.hasPrefix("littleBrowserWindow-"), mustClose(window) {
             emit(["ok": false, "error": "Forbidden Little Arc preview is still open"], status: 7)

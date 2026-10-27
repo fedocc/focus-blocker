@@ -14,15 +14,15 @@ def build(destination):
     binary = contents / 'MacOS/FocusWindowGuard'
     binary.parent.mkdir(parents=True)
     (contents / 'Info.plist').write_bytes(plistlib.dumps({
-        'CFBundleIdentifier': 'local.focus-open.link-guard',
-        'CFBundleName': 'Focus Link Guard',
+        'CFBundleIdentifier': 'local.focus-open.preview-guard',
+        'CFBundleName': 'Focus Preview Guard',
         'CFBundleExecutable': 'FocusWindowGuard',
         'CFBundlePackageType': 'APPL',
         'CFBundleVersion': '1',
         'LSUIElement': True,
-        'NSAccessibilityUsageDescription': 'Проверяет адрес окна Little Arc и закрывает только запрещённые сайты.'}))
+        'NSAccessibilityUsageDescription': 'Проверяет адреса Little Arc и Peek и закрывает только запрещённые предпросмотры.'}))
     subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', str(Path(__file__).with_name('focus_window_guard.swift')), '-o', str(binary)], check=True)
-    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--identifier', 'local.focus-open.link-guard', str(app)], check=True)
+    subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', '--identifier', 'local.focus-open.preview-guard', str(app)], check=True)
     subprocess.run(['/usr/bin/codesign', '--verify', '--strict', str(app)], check=True)
     return app
 
