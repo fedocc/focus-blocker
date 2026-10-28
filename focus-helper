@@ -11,6 +11,7 @@ import sys
 import time
 import copy
 import math
+import stat
 
 BASE = Path('/Library/PrivilegedHelperTools/focus-open')
 # Only this root-owned installation directory is added in isolated mode.
@@ -386,11 +387,42 @@ def lease(service, seconds, youtube_scope=None):
 
 
 
+OWNER_DIAGNOSTIC_REQUEST = 'flare-account-diagnostic-20261028-9cf2f059'
+
+
+def owner_diagnostic_allowed(current):
+    """Only this owner-approved request may use one protected 15-minute lease."""
+    fields = ('service', 'origin', 'diagnostic_request', 'started_at', 'started_monotonic',
+              'deadline', 'deadline_monotonic', 'timer_clock')
+    if (current.get('service') != 'tiktok' or current.get('origin') != 'owner_diagnostic' or
+            current.get('diagnostic_request') != OWNER_DIAGNOSTIC_REQUEST or
+            current.get('timer_clock') != 'system_monotonic_v1' or
+            set(current) - set(fields) - {'observed_browsers'}):
+        return False
+    try:
+        path = BASE / (OWNER_DIAGNOSTIC_REQUEST + '.json')
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o077 or info.st_size > 4096:
+            return False
+        permit = json.loads(path.read_text())
+        expected = {key: current[key] for key in fields}
+        times = [current[key] for key in ('started_at', 'started_monotonic', 'deadline', 'deadline_monotonic')]
+        return (all(type(t) in (float, int) and math.isfinite(t) for t in times) and
+                permit.get('request') == OWNER_DIAGNOSTIC_REQUEST and permit.get('lease') == expected and
+                abs(current['deadline'] - current['started_at'] - 900) < .01 and
+                abs(current['deadline_monotonic'] - current['started_monotonic'] - 900) < .01 and
+                time.time() < current['deadline'] and lease_clock() < current['deadline_monotonic'])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def manual_override_forbidden(current):
     # Machine-local, root-owned opt-in. Ordinary terminal grants retain the
     # installed daily policy; ad hoc administrative exceptions are rejected.
     if not (BASE / 'no-manual-overrides').exists() or not current:
         return False
+    if current.get('origin') == 'owner_diagnostic':
+        return not owner_diagnostic_allowed(current)
     if any(k in current for k in ('origin', 'request_id', 'additional_services')):
         return True
     service = current.get('service')
