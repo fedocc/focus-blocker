@@ -18,7 +18,7 @@ def prepare(destination):
     if stage.exists():raise ValueError('Нужен новый каталог; существующие файлы сохраняются.')
     if not APP.is_dir():raise ValueError('Сначала собери Focus Series Guard.app с build_window_guard.py --series и помести в /Applications.')
     stage.mkdir(parents=True)
-    for name in ('focus_series_policy.py','focus_series_schedule.py','series_open.py','install_series_schedule.py','Install Series Schedule.command'):
+    for name in ('focus_series_policy.py','focus_series_schedule.py','series_open.py','wait_series_idle.py','install_series_schedule.py','Install Series Schedule.command'):
         shutil.copy2(SOURCE/name,stage/name)
     helper=(BASE/'focus-helper').read_text()
     old="    try:\n        report = youtube.browser_report(tolerate_errors=True)\n        series_denied"
