@@ -20,6 +20,7 @@ import focus_youtube_guard as youtube
 import focus_service_policy as socials
 import focus_playlist_sync as playlist_sync
 import focus_study as study_lock
+import focus_series_policy as series
 HOSTS = Path('/etc/hosts')
 STATE = BASE / 'lease.json'
 HEARTBEAT = BASE / 'heartbeat'
@@ -471,7 +472,20 @@ def guard_cycle():
     study = youtube.study_scope(youtube.read_policy())
     scope = dict(current['youtube_scope'], study_ids=study['allowed_ids'], playlist_ids=study['playlist_ids'], channel_ids=study.get('channel_ids', []), channel_paths=study.get('channel_paths', []), channel_video_ids=study.get('channel_video_ids', [])) if current and current['service'] == 'youtube' else study
     try:
+        if series.ENABLED.exists():
+            series.publish_preview_permission(time.time(), studying=bool(focus))
+        series_hosts = series.hosts_text(HOSTS.read_text(), time.time(), studying=bool(focus))
+        if series_hosts != HOSTS.read_text():
+            write_hosts(series_hosts)
+            flush()
         report = youtube.browser_report(tolerate_errors=True)
+        series_denied = series.denied_targets(report, studying=bool(focus))
+        if series_denied:
+            youtube.close_tabs(series_denied)
+            report = youtube.browser_report(tolerate_errors=True)
+            if series.denied_targets(report, studying=bool(focus)):
+                youtube.force_stop_browsers({t['application'] for t in series_denied})
+                report = youtube.browser_report(tolerate_errors=True)
         if focusing:
             targets = youtube.targets_for(report, lambda u: bool(study_lock.distraction_site(u)))
             if targets:
@@ -580,6 +594,13 @@ def main():
     if os.geteuid() != 0:
         raise RuntimeError('Requires installed sudo permission')
     args = sys.argv[1:]
+    if args == ['series-event']:
+        # Read-only schedule status never waits for browser inspection or
+        # advances/resets study, episode history or existing service limits.
+        request = json.loads(sys.stdin.read(4097))
+        require_timer()
+        print(json.dumps(series.handle(request, studying=bool(study_lock.read()['session'])), ensure_ascii=False))
+        return
     if args == ['daemon']:
         with locked():
             startup()

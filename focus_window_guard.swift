@@ -82,6 +82,31 @@ func previewLocation(_ window: AXUIElement) -> PreviewLocation {
     return index >= 500 ? .unreadable : .empty
 }
 
+#if SERIES_SCHEDULE
+func seriesWindowIsOpen(_ date: Date) -> Bool {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Europe/Moscow")!
+    let parts = calendar.dateComponents([.weekday, .hour, .minute], from: date)
+    let minute = parts.hour! * 60 + parts.minute!
+    return [1, 2, 4, 6].contains(parts.weekday!) && minute >= 20 * 60 + 30 && minute < 22 * 60
+}
+func seriesPermitIsLive(_ now: Date) -> Bool {
+    let path = "/Library/PrivilegedHelperTools/focus-open/series-preview-permit.json"
+    guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+          attributes[.type] as? FileAttributeType == .typeRegular,
+          attributes[.ownerAccountID] as? Int == 0,
+          let mode = attributes[.posixPermissions] as? Int, mode & 0o022 == 0,
+          let data = try? Data(contentsOf: URL(fileURLWithPath: path)), data.count < 1024,
+          let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+          let until = value["allowed_until"] as? Double else { return false }
+    return now.timeIntervalSince1970 < until && until - now.timeIntervalSince1970 <= 15
+}
+func blockedPreviewURL(_ value: String) -> Bool {
+    guard let host = URLComponents(string: value)?.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) else { return false }
+    let domains = ["mirabreakingbad.com", "plplayer.online", "kalarona.org"]
+    return domains.contains(where: { host == $0 || host.hasSuffix("." + $0) }) && !(seriesWindowIsOpen(Date()) && seriesPermitIsLive(Date()))
+}
+#else
 func blockedPreviewURL(_ value: String) -> Bool {
     guard let parsed = URLComponents(string: value), let rawHost = parsed.host else { return false }
     let host = rawHost.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
@@ -102,6 +127,8 @@ func blockedPreviewURL(_ value: String) -> Bool {
         (["tbm", "udm"].contains(item.name) && ["vid", "vids", "7"].contains(item.value ?? ""))
     }
 }
+
+#endif
 
 func mustClose(_ window: AXUIElement) -> Bool {
     switch previewLocation(window) {
@@ -137,6 +164,23 @@ func forbiddenPeek(_ content: AXUIElement?) -> Bool {
 }
 
 if CommandLine.arguments.contains("--self-test") {
+#if SERIES_SCHEDULE
+    let parser = ISO8601DateFormatter()
+    var cases = 0
+    for (value, expected) in [("2026-11-02T20:29:59+03:00", false), ("2026-11-02T20:30:00+03:00", true),
+                              ("2026-11-02T21:59:59+03:00", true), ("2026-11-02T22:00:00+03:00", false),
+                              ("2026-11-03T21:00:00+03:00", false), ("2026-11-04T21:00:00+03:00", true),
+                              ("2026-11-05T21:00:00+03:00", false), ("2026-11-06T21:00:00+03:00", true),
+                              ("2026-11-07T21:00:00+03:00", false), ("2026-11-08T21:00:00+03:00", true)] {
+        precondition(seriesWindowIsOpen(parser.date(from: value)!) == expected)
+        cases += 1
+    }
+    for value in ["https://example.com/", "https://mirabreakingbad.com.example.org/", "https://youtube.com/"] {
+        precondition(!blockedPreviewURL(value))
+        cases += 1
+    }
+    emit(["ok": true, "schedule_cases": cases])
+#else
     let denied = ["https://youtube.com/watch?v=abcdefghijk", "https://www.youtube.com/", "https://youtu.be/abcdefghijk",
                   "https://youtube-nocookie.com/embed/abcdefghijk", "https://m.instagram.com/", "https://x.com/",
                   "https://web.telegram.org/k/", "https://vm.tiktok.com/a", "https://vkvideo.ru/video1",
@@ -147,6 +191,7 @@ if CommandLine.arguments.contains("--self-test") {
     for url in denied { precondition(blockedPreviewURL(url), "Forbidden preview was allowed: " + url) }
     for url in allowed { precondition(!blockedPreviewURL(url), "Ordinary preview was denied: " + url) }
     emit(["ok": true, "url_cases": denied.count + allowed.count])
+#endif
 }
 
 let request = CommandLine.arguments.contains("--request-permission")

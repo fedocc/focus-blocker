@@ -20,7 +20,7 @@ ADDON_FILES = ('__init__.py', 'bridge.py', 'dashboard.py', 'analytics.py', 'acti
 SOURCE_FILES = ('README.md', 'AGENTS.md', 'START_HERE.md', 'CODEX_SETUP.md', 'doctor.py', 'build_window_guard.py', 'focus_window_guard.swift',
                 'install.py', 'install-study.command', 'wait_study_idle.py', 'repair-study.command', 'repair-study.applescript',
                 'focus-helper', 'focus_open.py', 'focus_youtube_guard.py', 'focus_service_policy.py',
-                'focus_playlist_sync.py', 'focus_study.py', 'youtube-policy.json',
+                'focus_playlist_sync.py', 'focus_study.py', 'focus_series_policy.py', 'focus_series_schedule.py', 'youtube-policy.json',
                 'theme/focus-study.onigiri')
 
 

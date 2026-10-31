@@ -24,7 +24,7 @@ def build():
     source_files = ['README.md', 'AGENTS.md', 'START_HERE.md', 'CODEX_SETUP.md', 'prepare_friend.py', 'doctor.py', 'build_window_guard.py', 'focus_window_guard.swift',
                     'theme/focus-study.onigiri', 'install.py', 'install-study.command', 'wait_study_idle.py', 'repair-study.command', 'repair-study.applescript', 'focus-helper',
                     'focus_open.py', 'focus_youtube_guard.py', 'focus_service_policy.py',
-                    'focus_playlist_sync.py', 'focus_study.py', 'youtube-policy.json']
+                    'focus_playlist_sync.py', 'focus_study.py', 'focus_series_policy.py', 'focus_series_schedule.py', 'youtube-policy.json']
     source_files += [path.name for path in sorted(ROOT.glob('test_*.py'))]
     source_files += ['anki_study/' + name for name in addon_files]
     repair_app = destination / 'focus-study' / 'Repair-Focus.app'

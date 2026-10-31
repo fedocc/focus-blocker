@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote
 from focus_service_policy import service_for_url, day_at
+import focus_series_policy as series
 
 BASE = Path('/Library/PrivilegedHelperTools/focus-open')
 POLICY = BASE / 'youtube-policy.json'
@@ -303,6 +304,13 @@ def guard_arc_previews():
         return
     executable = Path('/Applications/Focus Preview Guard.app/Contents/MacOS/FocusWindowGuard')
     identity_path = BASE / 'arc-peek-guard-identity.json'
+    check_native_previews(executable, identity_path)
+    if (BASE / 'series-schedule-enabled').exists():
+        check_native_previews(Path('/Applications/Focus Series Guard.app/Contents/MacOS/FocusWindowGuard'),
+                              BASE / 'series-window-guard-identity.json')
+
+
+def check_native_previews(executable, identity_path):
     identity_info = identity_path.lstat()
     executable_info = executable.lstat()
     if (not stat.S_ISREG(identity_info.st_mode) or identity_info.st_uid != 0 or identity_info.st_mode & 0o022 or
@@ -399,7 +407,7 @@ def _browser_report(strict_unsupported=True, only_browser=None):
             'set tabIndex to tabIndex + 1',
             'set tabUrl to (URL of t) as text',
             'set tabId to ' + ('(id of t) as text' if kind == 'id' else 'tabIndex as text'),
-            'if tabUrl contains "tiktok" or tabUrl contains "musical.ly" or tabUrl contains "byteoversea.com" or tabUrl contains "ibytedtos.com" or tabUrl contains "ibyteimg.com" or tabUrl contains "youtube.com" or tabUrl contains "youtu.be" or tabUrl contains "youtube-nocookie.com" or tabUrl contains "instagram.com" or tabUrl contains "cdninstagram.com" or tabUrl contains "ig.me" or tabUrl contains "web.telegram.org" or tabUrl contains "t.me" or tabUrl contains "telegram.me" or tabUrl contains "google." or tabUrl contains "x.com" or tabUrl contains "twitter.com" or tabUrl contains "twimg.com" then',
+            'if tabUrl contains "mirabreakingbad.com" or tabUrl contains "plplayer.online" or tabUrl contains "kalarona.org" or tabUrl contains "tiktok" or tabUrl contains "musical.ly" or tabUrl contains "byteoversea.com" or tabUrl contains "ibytedtos.com" or tabUrl contains "ibyteimg.com" or tabUrl contains "youtube.com" or tabUrl contains "youtu.be" or tabUrl contains "youtube-nocookie.com" or tabUrl contains "instagram.com" or tabUrl contains "cdninstagram.com" or tabUrl contains "ig.me" or tabUrl contains "web.telegram.org" or tabUrl contains "t.me" or tabUrl contains "telegram.me" or tabUrl contains "google." or tabUrl contains "x.com" or tabUrl contains "twitter.com" or tabUrl contains "twimg.com" then',
             'set reportText to reportText & "T" & sep & ' + quoted + ' & sep & windowId & sep & tabId & sep & tabUrl & linefeed',
             'end if',
             'end repeat',
@@ -429,7 +437,7 @@ def _browser_report(strict_unsupported=True, only_browser=None):
 
 
 def is_controlled_url(value):
-    return is_youtube_surface(value) or service_for_url(value) is not None
+    return is_youtube_surface(value) or service_for_url(value) is not None or series.is_surface(value)
 
 
 def browser_report(strict_unsupported=True, browsers=None, tolerate_errors=False):

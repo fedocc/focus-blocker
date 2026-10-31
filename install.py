@@ -22,7 +22,7 @@ BASE = Path('/Library/PrivilegedHelperTools/focus-open')
 PLIST = Path('/Library/LaunchDaemons/local.focus-open.timer.plist')
 RULE = Path('/private/etc/sudoers.d/focus-open')
 HOSTS = Path('/private/etc/hosts')
-ROOT_FILES = ('focus-helper', 'focus_youtube_guard.py', 'focus_service_policy.py', 'focus_playlist_sync.py', 'focus_study.py')
+ROOT_FILES = ('focus-helper', 'focus_youtube_guard.py', 'focus_service_policy.py', 'focus_playlist_sync.py', 'focus_study.py', 'focus_series_policy.py', 'focus_series_schedule.py')
 ANKI_FILES = ('__init__.py', 'bridge.py', 'dashboard.py', 'analytics.py', 'activity_detail.py', 'review_health.py', 'focus-stats.js', 'focus-stats.css', 'manifest.json') + tuple(
     f'wallpaper-{scene}.png' for scene in ('dawn', 'day', 'evening', 'night')) + tuple(
     f'wallpaper-{theme}-{scene}.png'
@@ -136,6 +136,8 @@ def sudoers_text(username):
     commands = ('check', 'restore', 'stop', 'lease youtube', 'lease instagram', 'lease x', 'lease telegram', 'lease tiktok',
                 'guard-check', 'youtube-status', 'youtube-policy', 'youtube-duration',
                 'study-start', 'study-status', 'study-break-start', 'study-break-shorten', 'study-next-ready', 'study-next-update', 'study-next-start', 'study-emergency-request', 'study-emergency-confirm')
+    if (BASE / 'series-enabled').exists() or (BASE / 'series-schedule-enabled').exists():
+        commands += ('series-event',)
     return username + ' ALL=(root) NOPASSWD: ' + ', '.join(helper + ' ' + c for c in commands) + '\n'
 
 
