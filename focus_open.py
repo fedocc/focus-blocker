@@ -965,7 +965,7 @@ def youtube_target(raw_url: str | None, course: str | None, policy: dict[str, An
     if not validation.allowed or not video_id or not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
         raise FocusOpenError(validation.reason or "Нужна корректная ссылка на конкретное видео YouTube.")
     # Canonicalize away arbitrary playlist parameters: the root service checks actual membership.
-    return (f"https://www.youtube.com/watch?v={video_id}", {"video_id": video_id, "seconds": 12 * 60})
+    return (f"https://www.youtube.com/watch?v={video_id}", {"video_id": video_id})
 
 
 def prepare_youtube_browser() -> None:
@@ -1027,14 +1027,6 @@ def run_youtube(raw_url: str | None = None, course: str | None = None,
         try:
             save_state(state)
             open_url(url, browser_app)
-            if scope["mode"] == "video":
-                duration = get_youtube_duration_seconds(url)
-                if duration is not None:
-                    total = min(duration + YOUTUBE_BUFFER_SECONDS, 6 * 60 * 60)
-                    updated = helper_json("youtube-duration", payload=total)
-                    state["history"][-1]["duration_seconds"] = total
-                    state["active_unlock"]["ends_at"] = dt.datetime.fromtimestamp(updated["deadline"], opened_at.tzinfo).isoformat()
-                    save_state(state)
         except BaseException:
             restore_all_hosts_blocks()
             state.pop("active_unlock", None)

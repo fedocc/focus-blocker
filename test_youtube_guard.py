@@ -367,6 +367,9 @@ class RootIntegrationTests(unittest.TestCase):
         self.stack.enter_context(patch.multiple(guard, BASE=self.base, HEALTH=self.base / 'health.json', LAST_EVENT=self.base / 'event.json', USAGE=self.base / 'usage.json', POLICY=self.base / 'policy.json'))
         self.stack.enter_context(patch.object(socials, 'USAGE', self.base / 'socials.json'))
         self.stack.enter_context(patch.object(helper.study_lock, 'STATE', self.base / 'study.json'))
+        # Isolate the installed series schedule from browser guard tests.
+        self.stack.enter_context(patch.multiple(helper.series, BASE=self.base,
+            ENABLED=self.base / 'series-enabled', STATE=self.base / 'series-state.json'))
         self.stack.enter_context(patch.object(helper, 'boot_identity', return_value='test-boot'))
         guard.POLICY.write_text(json.dumps(POLICY))
         socials.USAGE.write_text(json.dumps({'schema_version':1, 'services':{}}))
@@ -1137,7 +1140,7 @@ class ClientIntegrationTests(unittest.TestCase):
         output=io.StringIO()
         with patch.object(client,'helper_json',side_effect=[{'lease':None},{},{'deadline':time.time()+720,'scope':scope}]) as rpc,patch.object(client,'get_youtube_duration_seconds',return_value=None),contextlib.redirect_stdout(output):
             client.run_youtube('https://youtu.be/'+OTHER)
-        self.assertEqual(rpc.call_args.args,('lease','youtube',{'video_id':OTHER,'seconds':720}))
+        self.assertEqual(rpc.call_args.args,('lease','youtube',{'video_id':OTHER}))
         self.assertIn(client.youtube_course_entry(COURSE),output.getvalue())
         self.assertIn('Автоблокировка:',output.getvalue())
 

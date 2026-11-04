@@ -1,5 +1,7 @@
 """Root-owned YouTube policy and browser observer; no browser extension required."""
 import json
+import contextlib
+import signal
 import hashlib
 import stat
 import ctypes
@@ -13,6 +15,7 @@ import tempfile
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, unquote
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 from focus_service_policy import service_for_url, day_at
 import focus_series_policy as series
 
@@ -24,6 +27,8 @@ LAST_EVENT = BASE / 'youtube-last-event.json'
 VIDEO_ID = re.compile(r'^[A-Za-z0-9_-]{11}$')
 CHANNEL_ID = re.compile(r'^UC[A-Za-z0-9_-]{22}$')
 COOLDOWN = 6 * 60 * 60
+VIDEO_FALLBACK_SECONDS = 12 * 60
+VIDEO_BUFFER_SECONDS = 120
 SCRIPT_TIMEOUT = 5
 BROWSERS = {
     'Arc': ('company.thebrowser.Browser', 'id'),
@@ -128,7 +133,44 @@ def study_scope(policy, playlist_id=None):
             'seconds': None, 'persistent_study': True}
 
 
-def make_scope(request, policy, usage, now):
+def verified_video_seconds(video_id, fetch=None):
+    """Read only public metadata, never browser cookies or a user executable."""
+    if not isinstance(video_id, str) or not VIDEO_ID.fullmatch(video_id):
+        return None
+    class NoRedirects(HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            raise ValueError('Unexpected video metadata redirect')
+    def public_watch():
+        opener = build_opener(ProxyHandler({}), NoRedirects())
+        url = 'https://www.youtube.com/watch?v=' + video_id + '&hl=en'
+        request = Request(url, headers={'User-Agent': 'Mozilla/5.0',
+                          'Accept-Encoding': 'identity', 'Accept-Language': 'en-US'})
+        maximum = 8 * 1024 * 1024
+        with opener.open(request, timeout=5) as response:
+            raw = response.read(maximum + 1)
+        if len(raw) > maximum:
+            raise ValueError('Video metadata exceeded size limit')
+        return raw.decode('utf-8')
+    try:
+        html = (fetch or public_watch)()
+        for match in re.finditer(r'(?:var\s+)?ytInitialPlayerResponse\s*=\s*', html):
+            try:
+                player, _ = json.JSONDecoder().raw_decode(html[match.end():])
+                details = player['videoDetails']
+                seconds = details.get('lengthSeconds')
+                if (player.get('playabilityStatus', {}).get('status') != 'OK' or
+                        details.get('videoId') != video_id or not isinstance(seconds, str) or
+                        not re.fullmatch(r'[0-9]{1,6}', seconds) or not 1 <= int(seconds) <= 86400):
+                    continue
+                return min(int(seconds) + VIDEO_BUFFER_SECONDS, COOLDOWN)
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue
+    except (OSError, ValueError, TypeError, TimeoutError):
+        pass
+    return None
+
+
+def make_scope(request, policy, usage, now, *, verified_seconds=None):
     if not isinstance(request, dict):
         raise ValueError('YouTube requires a specific video or an approved playlist')
     playlist_id = request.get('playlist_id')
@@ -164,9 +206,11 @@ def make_scope(request, policy, usage, now):
         raise RuntimeError('YouTube уже открывался сегодня; новое обычное видео доступно после полуночи по Москве.')
     if int(usage.get('counts', {}).get(video_id, 0)) >= 2:
         raise RuntimeError('Эта ссылка уже использована 2 раза. Повторный доступ закрыт.')
-    seconds = request.get('seconds', 12 * 60)
+    limit = verified_seconds if type(verified_seconds) is int and 1 <= verified_seconds <= COOLDOWN else VIDEO_FALLBACK_SECONDS
+    seconds = request.get('seconds', limit)
     if isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= COOLDOWN:
         raise ValueError('Invalid YouTube session duration')
+    seconds = min(seconds, limit)
     study = study_scope(policy)
     return {'mode': 'video', 'allowed_ids': [video_id], 'seconds': seconds,
             'study_ids': study['allowed_ids'], 'playlist_ids': study['playlist_ids'],
@@ -232,6 +276,10 @@ def url_allowed(scope, value):
     if is_video_preview_url(value):
         return False
     if parsed.scheme not in ('http', 'https') or parsed.username or parsed.password or parsed.port:
+        return False
+    # An embedded player can change its playing video without updating the
+    # document URL. Approved lectures use canonical watch/playlist pages.
+    if is_youtube_url(value) and parsed.path.rstrip('/').startswith('/embed'):
         return False
     if is_youtube_url(value) and temporary_full_access_active(scope):
         return True
@@ -310,6 +358,29 @@ def guard_arc_previews():
                               BASE / 'series-window-guard-identity.json')
 
 
+@contextlib.contextmanager
+def preview_launcher(command):
+    # The signed app waits for our socket acknowledgement. Waiting for open
+    # first can deadlock that handshake while LaunchServices waits for the app.
+    launcher = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                start_new_session=True)
+    try:
+        yield
+    finally:
+        try:
+            launcher.wait(timeout=.25)
+        except subprocess.TimeoutExpired:
+            # Only our fresh launchctl/sudo/open process group is retired.
+            # LaunchServices launches the signed app in its own GUI session.
+            try: os.killpg(launcher.pid, signal.SIGTERM)
+            except ProcessLookupError: pass
+            try: launcher.wait(timeout=.5)
+            except subprocess.TimeoutExpired:
+                try: os.killpg(launcher.pid, signal.SIGKILL)
+                except ProcessLookupError: pass
+                launcher.wait(timeout=.5)
+
+
 def check_native_previews(executable, identity_path):
     identity_info = identity_path.lstat()
     executable_info = executable.lstat()
@@ -333,40 +404,39 @@ def check_native_previews(executable, identity_path):
             os.chmod(endpoint, 0o622)
             server.listen(4)
             deadline = time.monotonic() + SCRIPT_TIMEOUT
-            subprocess.run(['/bin/launchctl', 'asuser', str(uid), '/usr/bin/sudo', '-n', '-u', owner,
-                            '/usr/bin/open', '-g', '-n', str(executable.parents[2]), '--args', '--result-socket', endpoint],
-                           capture_output=True, text=True, timeout=SCRIPT_TIMEOUT, check=True)
-            library = ctypes.CDLL('/usr/lib/libproc.dylib')
-            library.proc_pidpath.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
-            library.proc_pidpath.restype = ctypes.c_int
-            code_library = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
-            code_library.csops.argtypes = (ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_size_t)
-            code_library.csops.restype = ctypes.c_int
-            while True:
-                server.settimeout(max(.01, deadline - time.monotonic()))
-                try:
-                    connection, _ = server.accept()
-                except socket.timeout:
-                    raise RuntimeError('Focus Window Guard не ответил; проверь Универсальный доступ') from None
-                with connection:
-                    peer_pid = connection.getsockopt(0, 2)  # SOL_LOCAL / LOCAL_PEERPID, from the kernel.
-                    path_buffer = ctypes.create_string_buffer(4096)
-                    length = library.proc_pidpath(peer_pid, path_buffer, len(path_buffer))
-                    code_hash = ctypes.create_string_buffer(20)
-                    signed_peer = code_library.csops(peer_pid, 5, code_hash, 20) == 0 and code_hash.raw.hex() == identity['cdhash']
-                    if not length or Path(os.fsdecode(path_buffer.value)) != executable or not signed_peer:
-                        if time.monotonic() >= deadline:
-                            raise RuntimeError('Focus Window Guard: ответ не подтверждён')
-                        continue
-                    connection.settimeout(max(.01, deadline - time.monotonic()))
-                    connection.sendall(b'1')
-                    data = b''
-                    while b'\n' not in data and len(data) < 4096:
-                        chunk = connection.recv(4096 - len(data))
-                        if not chunk:
-                            break
-                        data += chunk
-                    break
+            with preview_launcher(['/bin/launchctl', 'asuser', str(uid), '/usr/bin/sudo', '-n', '-u', owner,
+                            '/usr/bin/open', '-g', '-n', str(executable.parents[2]), '--args', '--result-socket', endpoint]):
+                library = ctypes.CDLL('/usr/lib/libproc.dylib')
+                library.proc_pidpath.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+                library.proc_pidpath.restype = ctypes.c_int
+                code_library = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+                code_library.csops.argtypes = (ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_size_t)
+                code_library.csops.restype = ctypes.c_int
+                while True:
+                    server.settimeout(max(.01, deadline - time.monotonic()))
+                    try:
+                        connection, _ = server.accept()
+                    except socket.timeout:
+                        raise RuntimeError('Focus Window Guard не ответил; проверь Универсальный доступ') from None
+                    with connection:
+                        peer_pid = connection.getsockopt(0, 2)  # SOL_LOCAL / LOCAL_PEERPID, from the kernel.
+                        path_buffer = ctypes.create_string_buffer(4096)
+                        length = library.proc_pidpath(peer_pid, path_buffer, len(path_buffer))
+                        code_hash = ctypes.create_string_buffer(20)
+                        signed_peer = code_library.csops(peer_pid, 5, code_hash, 20) == 0 and code_hash.raw.hex() == identity['cdhash']
+                        if not length or Path(os.fsdecode(path_buffer.value)) != executable or not signed_peer:
+                            if time.monotonic() >= deadline:
+                                raise RuntimeError('Focus Window Guard: ответ не подтверждён')
+                            continue
+                        connection.settimeout(max(.01, deadline - time.monotonic()))
+                        connection.sendall(b'1')
+                        data = b''
+                        while b'\n' not in data and len(data) < 4096:
+                            chunk = connection.recv(4096 - len(data))
+                            if not chunk:
+                                break
+                            data += chunk
+                        break
     try:
         value = json.loads(data)
     except ValueError:

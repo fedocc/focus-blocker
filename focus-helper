@@ -199,7 +199,38 @@ def read_lease():
 
 # Educational access is policy, never a lease. Only ordinary videos and social
 # windows occupy lease.json. Browser snapshots are shared across all guards.
-OBSERVED = {service: set() for service in TEMPORARY_SERVICES}
+OBSERVED = {service: set() for service in TEMPORARY_SERVICES + ('series',)}
+
+
+def observed_browser_report(**options):
+    report = youtube.browser_report(**options)
+    # Retain the last known series browser only while its observation fails.
+    previous = OBSERVED.get('series', set())
+    OBSERVED['series'] = (previous & set(getattr(report, 'errors', {}))) | {
+        t['application'] for t in youtube.targets_for(report, series.is_surface)}
+    if series.ENABLED.exists() and OBSERVED['series'] != previous:
+        youtube.atomic_json(BASE / 'series-observed-browsers.json',
+                            {'schema': 1, 'browsers': sorted(OBSERVED['series'])})
+    return report
+
+
+def load_series_observations():
+    path = BASE / 'series-observed-browsers.json'
+    if not path.exists():
+        return
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022 or info.st_size > 4096:
+        raise RuntimeError('Нарушены права состояния наблюдения за сериалом.')
+    value = json.loads(path.read_text())
+    names = value.get('browsers')
+    if (value.get('schema') != 1 or not isinstance(names, list) or
+            any(not isinstance(name, str) or name not in youtube.BROWSERS for name in names)):
+        raise RuntimeError('Повреждено состояние наблюдения за сериалом.')
+    OBSERVED['series'] = set(names)
+
+
+def series_closed(focus):
+    return series.ENABLED.exists() and not series.public_status(None, time.time(), studying=bool(focus))['active']
 
 
 def set_access(service, unlock):
@@ -478,25 +509,25 @@ def guard_cycle():
         if series_hosts != HOSTS.read_text():
             write_hosts(series_hosts)
             flush()
-        report = youtube.browser_report(tolerate_errors=True)
+        report = observed_browser_report(tolerate_errors=True)
         series_denied = series.denied_targets(report, studying=bool(focus))
         if series_denied:
             youtube.close_tabs(series_denied)
-            report = youtube.browser_report(tolerate_errors=True)
+            report = observed_browser_report(tolerate_errors=True)
             if series.denied_targets(report, studying=bool(focus)):
                 youtube.force_stop_browsers({t['application'] for t in series_denied})
-                report = youtube.browser_report(tolerate_errors=True)
+                report = observed_browser_report(tolerate_errors=True)
         if focusing:
             targets = youtube.targets_for(report, lambda u: bool(study_lock.distraction_site(u)))
             if targets:
                 for site in {study_lock.distraction_site(t['url']) for t in targets}:
                     study_lock.record_attempt('site', site)
                 youtube.close_tabs(targets)
-                report = youtube.browser_report(tolerate_errors=True)
+                report = observed_browser_report(tolerate_errors=True)
                 remaining = youtube.targets_for(report, lambda u: bool(study_lock.distraction_site(u)))
                 if remaining:
                     youtube.force_stop_browsers({t['application'] for t in remaining})
-                    report = youtube.browser_report(tolerate_errors=True)
+                    report = observed_browser_report(tolerate_errors=True)
         observer_errors = dict(getattr(report, 'errors', {}))
         denied = youtube.targets_for(report, lambda u: youtube.is_youtube_surface(u) and not youtube.url_allowed(scope, u))
         if denied:
@@ -507,13 +538,13 @@ def guard_cycle():
             if current and current['service'] == 'youtube':
                 STATE.unlink(missing_ok=True)
                 current = None
-            report = youtube.browser_report(tolerate_errors=True)
+            report = observed_browser_report(tolerate_errors=True)
             observer_errors = dict(getattr(report, 'errors', {}))
             targets = youtube.targets_for(report, lambda u: youtube.is_youtube_surface(u) and not youtube.url_allowed(study, u))
             seen = {(t['application'], t['window'], t['tab']) for t in targets}
             targets.extend(t for t in denied if (t['application'], t['window'], t['tab']) not in seen)
             youtube.close_tabs(targets)
-            report = youtube.browser_report(tolerate_errors=True)
+            report = observed_browser_report(tolerate_errors=True)
             observer_errors = dict(getattr(report, 'errors', {}))
             if youtube.targets_for(report, lambda u: youtube.is_youtube_surface(u) and not youtube.url_allowed(study, u)):
                 raise RuntimeError('Не удалось закрыть запрещённое видео')
@@ -529,7 +560,7 @@ def guard_cycle():
                 if targets:
                     study_lock.record_attempt('site', service)
                     youtube.close_tabs(targets)
-                    report = youtube.browser_report(tolerate_errors=True)
+                    report = observed_browser_report(tolerate_errors=True)
                     observer_errors = dict(getattr(report, 'errors', {}))
                     if youtube.targets_for(report, lambda u: socials.service_for_url(u) == service):
                         raise RuntimeError('Не удалось закрыть вкладку ' + service)
@@ -541,7 +572,9 @@ def guard_cycle():
             # Reset cached denied connections only in the failed browser. The
             # healthy Arc carrying Telegram is not selected for a Chrome error.
             blocked = {'youtube'} | (set(SOCIAL_SERVICES) - lease_services(current))
-            reset = set().union(*(OBSERVED[s] for s in blocked)) & set(observer_errors) & set(youtube.BROWSERS)
+            if series_closed(focus):
+                blocked.add('series')
+            reset = set().union(*(OBSERVED.get(s, set()) for s in blocked)) & set(observer_errors) & set(youtube.BROWSERS)
             if reset:
                 youtube.force_stop_browsers(reset)
                 for names in OBSERVED.values():
@@ -563,11 +596,15 @@ def guard_cycle():
             set_access(service, allowed)
             if not allowed:
                 blocked.add(service)
-        names = set().union(*(OBSERVED[s] for s in blocked))
+        deny_series = series_closed(focus)
+        if deny_series:
+            blocked.add('series')
+        names = set().union(*(OBSERVED.get(s, set()) for s in blocked))
         youtube.publish_health(False, str(error))
         youtube.record_event('observer_error', str(error)[:500], names)
         try:
-            close_matching(lambda u: youtube.is_youtube_surface(u) or socials.service_for_url(u) in blocked, names)
+            close_matching(lambda u: youtube.is_youtube_surface(u) or socials.service_for_url(u) in blocked or
+                           (deny_series and series.is_surface(u)), names)
         except Exception as cleanup_error:
             youtube.record_event('cleanup_error', str(cleanup_error)[:500], names)
             raise
@@ -586,6 +623,7 @@ def startup():
     revoke_lease()
     for service in SOCIAL_SERVICES:
         set_access(service, False)
+    load_series_observations()
     set_study_web(bool(study_lock.read()['session'] and study_lock.read()['session']['phase'] in ('focus', 'prepare')))
     youtube.publish_health(False, 'Проверка после запуска')
 
@@ -623,6 +661,7 @@ def main():
             time.sleep(0.5)
     duration = None
     request = None
+    verified_seconds = None
     # Input is parsed outside the daemon lock, preventing an idle pipe from
     # freezing every timer. No executable caller input reaches the observer.
     if len(args) == 2 and args[0] == 'lease' and args[1] in TEMPORARY_SERVICES:
@@ -648,6 +687,14 @@ def main():
                               supports_confirmed_break=True, supports_pomodoro=True,
                               supports_simple_emergency=True), ensure_ascii=False))
         return
+    if args == ['lease', 'youtube'] and isinstance(request, dict):
+        candidate = request.get('video_id')
+        policy = youtube.read_policy()
+        if (isinstance(candidate, str) and youtube.VIDEO_ID.fullmatch(candidate) and
+                candidate not in set(youtube.study_scope(policy)['allowed_ids'])):
+            # Network work is outside the timer mutex. Quotas, study state and
+            # the current lease are checked again under the lock below.
+            verified_seconds = youtube.verified_video_seconds(candidate)
     with locked():
         if args == ['study-start']:
             print(json.dumps(start_study(request), ensure_ascii=False))
@@ -684,6 +731,10 @@ def main():
                 raise RuntimeError('No single-video session is active')
             if duration is None or not 1 <= duration <= 21600:
                 raise ValueError('Invalid duration')
+            existing = min(current['deadline'] - current['started_at'],
+                           current['deadline_monotonic'] - current['started_monotonic'])
+            if duration > existing:
+                raise RuntimeError('Увеличение сеанса запрещено: длительность проверяется при открытии видео.')
             current['deadline'] = current['started_at'] + duration
             current['deadline_monotonic'] = current['started_monotonic'] + duration
             youtube.atomic_json(STATE, current)
@@ -693,7 +744,7 @@ def main():
                 require_timer()
                 require_observer()
                 previous = youtube.read_usage()
-                scope = youtube.make_scope(request, youtube.read_policy(), previous, time.time())
+                scope = youtube.make_scope(request, youtube.read_policy(), previous, time.time(), verified_seconds=verified_seconds)
                 if scope['mode'] == 'playlist':
                     # Compatible with older terminal commands, but never creates
                     # a timed educational grant or blocks a social window.
