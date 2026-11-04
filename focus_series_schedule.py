@@ -4,10 +4,10 @@ import math
 from zoneinfo import ZoneInfo
 
 TIMEZONE = ZoneInfo('Europe/Moscow')
-WEEKDAYS = frozenset((0, 2, 4, 6))  # Monday, Wednesday, Friday, Sunday.
+WEEKDAYS = frozenset((2, 4, 6))  # Wednesday, Friday, Sunday.
 START = dt.time(20, 30)
 END = dt.time(22, 0)
-LABEL = 'Пн, Ср, Пт, Вс · 20:30–22:00 · Москва'
+LABEL = 'Ср, Пт, Вс · 20:30–22:00 · Москва'
 
 
 def window_at(now):

@@ -75,7 +75,7 @@ def main():
     writes={BASE/name:(value,0o755 if name=='focus-helper' else 0o644,0,0) for name,value in data.items() if name!='series_open.py'}
     writes.update({client:(data['series_open.py'],0o755,user.pw_uid,user.pw_gid),
                    launcher:(('#!/bin/sh\nexec python3 '+shlex.quote(str(client))+' "$@"\n').encode(),0o755,user.pw_uid,user.pw_gid),
-                   BASE/'series-schedule-enabled':(b'Mon Wed Fri Sun 20:30-22:00 Europe/Moscow; whole site; no browser extension.\n',0o444,0,0)})
+                   BASE/'series-schedule-enabled':(b'Wed Fri Sun 20:30-22:00 Europe/Moscow; whole site; no browser extension.\n',0o444,0,0)})
     hosts=Path('/etc/hosts')
     with (BASE/'lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX)
@@ -112,7 +112,7 @@ def main():
         if health.get('ok') and health.get('checked_at',0)>began:break
         if time.monotonic()>until:raise RuntimeError('Не подтверждена работа службы. Нужна проверка; сайт остаётся закрыт.')
         time.sleep(.5)
-    print('Установлено: Пн, Ср, Пт, Вс, 20:30–22:00 по Москве. Доступ ко всему сайту, без выбора серии.')
+    print('Установлено: Ср, Пт, Вс, 20:30–22:00 по Москве. Доступ ко всему сайту, без выбора серии.')
     print('Отключи старое расширение «Focus · одна серия» в Arc. Команда: series; проверка: series --status.')
 
 if __name__=='__main__':

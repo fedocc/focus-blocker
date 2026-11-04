@@ -88,7 +88,7 @@ func seriesWindowIsOpen(_ date: Date) -> Bool {
     calendar.timeZone = TimeZone(identifier: "Europe/Moscow")!
     let parts = calendar.dateComponents([.weekday, .hour, .minute], from: date)
     let minute = parts.hour! * 60 + parts.minute!
-    return [1, 2, 4, 6].contains(parts.weekday!) && minute >= 20 * 60 + 30 && minute < 22 * 60
+    return [1, 4, 6].contains(parts.weekday!) && minute >= 20 * 60 + 30 && minute < 22 * 60
 }
 func seriesPermitIsLive(_ now: Date) -> Bool {
     let path = "/Library/PrivilegedHelperTools/focus-open/series-preview-permit.json"
@@ -167,9 +167,11 @@ if CommandLine.arguments.contains("--self-test") {
 #if SERIES_SCHEDULE
     let parser = ISO8601DateFormatter()
     var cases = 0
-    for (value, expected) in [("2026-11-02T20:29:59+03:00", false), ("2026-11-02T20:30:00+03:00", true),
-                              ("2026-11-02T21:59:59+03:00", true), ("2026-11-02T22:00:00+03:00", false),
+    for (value, expected) in [("2026-11-02T20:29:59+03:00", false), ("2026-11-02T20:30:00+03:00", false),
+                              ("2026-11-02T21:59:59+03:00", false), ("2026-11-02T22:00:00+03:00", false),
                               ("2026-11-03T21:00:00+03:00", false), ("2026-11-04T21:00:00+03:00", true),
+                              ("2026-11-04T20:29:59+03:00", false), ("2026-11-04T20:30:00+03:00", true),
+                              ("2026-11-04T21:59:59+03:00", true), ("2026-11-04T22:00:00+03:00", false),
                               ("2026-11-05T21:00:00+03:00", false), ("2026-11-06T21:00:00+03:00", true),
                               ("2026-11-07T21:00:00+03:00", false), ("2026-11-08T21:00:00+03:00", true)] {
         precondition(seriesWindowIsOpen(parser.date(from: value)!) == expected)

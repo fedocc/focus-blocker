@@ -8,7 +8,7 @@ import focus_series_policy as series
 from focus_series_schedule import window_at, TIMEZONE
 
 
-def timestamp(day='2026-11-02', clock='20:30:00'):
+def timestamp(day='2026-11-04', clock='20:30:00'):
     return dt.datetime.fromisoformat(day+'T'+clock).replace(tzinfo=TIMEZONE).timestamp()
 
 class SeriesScheduleTests(unittest.TestCase):
@@ -16,14 +16,26 @@ class SeriesScheduleTests(unittest.TestCase):
         for day in range(7):
             date=(dt.date(2026,11,2)+dt.timedelta(days=day)).isoformat()
             for clock in ('20:30:00','21:15:00','21:59:59'):
-                self.assertEqual(window_at(timestamp(date,clock))['open'],day in (0,2,4,6),(date,clock))
+                self.assertEqual(window_at(timestamp(date,clock))['open'],day in (2,4,6),(date,clock))
             for clock in ('00:00:00','20:29:59','22:00:00','23:59:59'):
                 self.assertFalse(window_at(timestamp(date,clock))['open'],(date,clock))
+    def test_removed_monday_blocks_network_video_and_native_preview(self):
+        monday=timestamp('2026-11-02','21:00:00')
+        self.assertFalse(series.public_status(None,monday)['active'])
+        self.assertEqual(window_at(monday)['start'],timestamp('2026-11-04'))
+        self.assertFalse(series.allowed_url(series.SITE_URL,None,monday))
+        with tempfile.TemporaryDirectory() as folder,patch.object(series,'BASE',Path(folder)),patch.object(series,'ENABLED',Path(folder)/'enabled'):
+            series.ENABLED.touch()
+            series.publish_preview_permission(monday)
+            self.assertEqual(json.loads((Path(folder)/'series-preview-permit.json').read_text())['allowed_until'],0)
+            original='# === FOCUS_BLOCK:SERIES START ===\n# TEMP_FOCUS_UNLOCK 127.0.0.1 mirabreakingbad.com\n# === FOCUS_BLOCK:SERIES END ===\n'
+            self.assertIn('\n127.0.0.1 mirabreakingbad.com\n',series.hosts_text(original,monday))
+
     def test_next_window_and_moscow_time(self):
-        self.assertEqual(window_at(timestamp(clock='22:00:00'))['start'],timestamp('2026-11-04'))
-        self.assertEqual(window_at(timestamp('2026-11-08','22:00:00'))['start'],timestamp('2026-11-09'))
-        self.assertTrue(window_at(dt.datetime(2026,11,2,17,30,tzinfo=dt.timezone.utc).timestamp())['open'])
-        self.assertFalse(window_at(dt.datetime(2026,11,2,19,0,tzinfo=dt.timezone.utc).timestamp())['open'])
+        self.assertEqual(window_at(timestamp(clock='22:00:00'))['start'],timestamp('2026-11-06'))
+        self.assertEqual(window_at(timestamp('2026-11-08','22:00:00'))['start'],timestamp('2026-11-11'))
+        self.assertTrue(window_at(dt.datetime(2026,11,4,17,30,tzinfo=dt.timezone.utc).timestamp())['open'])
+        self.assertFalse(window_at(dt.datetime(2026,11,4,19,0,tzinfo=dt.timezone.utc).timestamp())['open'])
     def test_whole_site_is_allowed_without_episode_or_extension_heartbeat(self):
         for url in ('https://www.mirabreakingbad.com/','https://www.mirabreakingbad.com/episodes/br-5-season-16-seriya/',
                     'https://plplayer.online/s/455?season=3&episode=10&voice=1', 'https://kalarona.org/s/540'):
