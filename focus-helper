@@ -492,6 +492,32 @@ def remember_report(report, current):
             youtube.atomic_json(STATE, current)
 
 
+def dismiss_accidental_youtube_home(current, scope, denied):
+    if (not current or current['service'] != 'youtube' or scope['mode'] != 'video' or
+            current.get('home_dismissed') or current.get('timer_clock') != 'system_monotonic_v1' or
+            len(denied) != 1):
+        return None
+    tab = denied[0]
+    if (tab['application'] != 'Arc' or tab['kind'] != 'id' or
+            tab['url'] not in ('https://youtube.com/', 'https://www.youtube.com/')):
+        return None
+    try:
+        youtube.close_tabs(denied, require_unchanged=True)
+    except RuntimeError:
+        # A redirect or missing close acknowledgement takes the revocation path.
+        return None
+    report = observed_browser_report(tolerate_errors=True)
+    if (getattr(report, 'errors', {}) or
+            youtube.targets_for(report, lambda url: youtube.is_youtube_surface(url) and not youtube.url_allowed(scope, url)) or
+            time.time() >= current['deadline'] or lease_clock() >= current['deadline_monotonic']):
+        return None
+    # At most once per existing session. Keep the reservation and both deadlines.
+    current['home_dismissed'] = True
+    youtube.atomic_json(STATE, current)
+    youtube.record_event('home_dismissed', 'Главная YouTube закрыта; таймер выбранного видео продолжается', {'Arc'})
+    return report
+
+
 def guard_cycle():
     current = read_lease()
     if manual_override_forbidden(current):
@@ -533,6 +559,12 @@ def guard_cycle():
         if denied:
             study_lock.record_attempt('site', 'youtube')
             set_access('youtube', False)
+            if not focus and not observer_errors:
+                clean = dismiss_accidental_youtube_home(current, scope, denied)
+                if clean is not None:
+                    report = clean
+                    denied = []
+        if denied:
             # An outside video revokes only the ordinary-video entitlement.
             # Lectures and an unrelated Telegram/Instagram timer remain intact.
             if current and current['service'] == 'youtube':

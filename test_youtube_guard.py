@@ -567,6 +567,46 @@ class RootIntegrationTests(unittest.TestCase):
         self.assertIn(helper.PREFIX,helper.HOSTS.read_text())
         self.force.assert_not_called()
 
+    def test_one_accidental_arc_homepage_keeps_the_existing_video_and_deadline(self):
+        self.regular()
+        before = helper.read_lease()
+        guard.USAGE.write_text(json.dumps({'counts': {OTHER: 1}, 'last_regular_opened_at': before['started_at']}))
+        usage = guard.USAGE.read_bytes()
+        selected = 'https://youtu.be/' + OTHER
+        home = 'https://www.youtube.com/'
+        self.report.side_effect = [self.tabs(selected, home), self.tabs(selected)]
+        self.assertTrue(helper.guard_cycle())
+        self.assertEqual([tab['url'] for tab in self.close.call_args.args[0]], [home])
+        self.assertTrue(self.close.call_args.kwargs['require_unchanged'])
+        current = helper.read_lease()
+        for key in ('started_at', 'deadline', 'started_monotonic', 'deadline_monotonic', 'youtube_scope'):
+            self.assertEqual(current[key], before[key])
+        self.assertEqual(guard.USAGE.read_bytes(), usage)
+
+        self.report.side_effect = [self.tabs(selected, home), self.tabs(selected, home), []]
+        self.assertTrue(helper.guard_cycle())
+        self.assertIsNone(helper.read_lease())
+        self.assertEqual(guard.USAGE.read_bytes(), usage)
+
+    def test_homepage_redirect_to_another_video_still_revokes_the_lease(self):
+        self.regular()
+        selected = 'https://youtu.be/' + OTHER
+        outside = 'https://youtu.be/' + ANOTHER
+        self.report.side_effect = [self.tabs(selected, 'https://youtube.com/'), self.tabs(selected, outside), []]
+        self.close.side_effect = [RuntimeError('Tab changed before it could be closed'), None]
+        self.assertTrue(helper.guard_cycle())
+        self.assertIsNone(helper.read_lease())
+        self.assertEqual({tab['url'] for tab in self.close.call_args.args[0]}, {selected, outside})
+
+    def test_homepage_cleanup_cannot_preserve_an_expired_lease(self):
+        self.regular()
+        before = helper.read_lease()
+        selected = 'https://youtu.be/' + OTHER
+        self.report.side_effect = [self.tabs(selected, 'https://youtube.com/'), self.tabs(selected), self.tabs(selected), []]
+        with patch.object(helper, 'lease_clock', return_value=before['deadline_monotonic']):
+            self.assertTrue(helper.guard_cycle())
+        self.assertIsNone(helper.read_lease())
+
     def test_expiring_regular_video_preserves_lecture_and_browser(self):
         self.regular()
         self.report.side_effect=[self.tabs('https://youtu.be/'+VIDEO,'https://youtu.be/'+OTHER),self.tabs('https://youtu.be/'+VIDEO),self.tabs('https://youtu.be/'+VIDEO)]
@@ -886,6 +926,15 @@ class RootIntegrationTests(unittest.TestCase):
 
 
 class RaceAndMigrationTests(unittest.TestCase):
+    def test_homepage_close_requires_matching_url_and_positive_acknowledgement(self):
+        target = {'application': 'Arc', 'kind': 'id', 'window': 'w', 'tab': 't', 'url': 'https://youtube.com/'}
+        with patch.object(guard, 'user_script', return_value='OK') as script:
+            guard.close_tabs([target], require_unchanged=True)
+        source = script.call_args.args[0]
+        self.assertIn('if tabId is "t" and ((URL of t) as text) is "https://youtube.com/" then', source)
+        self.assertLess(source.index('close t'), source.index('set targetClosed to true'))
+        self.assertIn('if not targetClosed then error', source)
+
     def test_arc_index_race_is_retried_without_closing_a_lecture(self):
         report=[{'name':'Arc','kind':'id','tabs':[{'window':'w','tab':'t','url':'https://youtu.be/'+VIDEO}]}]
         with patch.object(guard,'browser_processes',return_value={'Arc'}),patch.object(guard,'_browser_report',side_effect=[RuntimeError('Неверный индекс. (-1719)'),report]) as observer,patch.object(guard.time,'sleep'),patch.object(guard,'close_tabs') as close:

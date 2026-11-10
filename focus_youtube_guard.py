@@ -542,7 +542,7 @@ def browser_report(strict_unsupported=True, browsers=None, tolerate_errors=False
     return report
 
 
-def _close_tabs(targets):
+def _close_tabs(targets, *, require_unchanged=False):
     if not targets:
         return
     lines = []
@@ -555,8 +555,10 @@ def _close_tabs(targets):
         quoted_tab = json.dumps(target['tab'])
         # Stable tab IDs identify the denied tab even if its URL changes
         # between observation and closing. Safari only exposes an index.
-        url_check = (' and ((URL of t) as text) is ' + json.dumps(target['url'])
-                     if target['kind'] == 'index' else '')
+        check_url = target['kind'] == 'index' or require_unchanged
+        url_check = ' and ((URL of t) as text) is ' + json.dumps(target['url']) if check_url else ''
+        if require_unchanged:
+            lines.append('set targetClosed to false')
         lines.extend([
             'if application ' + quoted_name + ' is running then',
             'tell application ' + quoted_name,
@@ -568,6 +570,7 @@ def _close_tabs(targets):
             'set tabId to ' + ('(id of t) as text' if target['kind'] == 'id' else 'tabIndex as text'),
             'if tabId is ' + quoted_tab + url_check + ' then',
             'close t',
+            *(['set targetClosed to true'] if require_unchanged else []),
             'exit repeat',
             'end if',
             'end repeat',
@@ -576,16 +579,18 @@ def _close_tabs(targets):
             'end tell',
             'end if',
         ])
+        if require_unchanged:
+            lines.append('if not targetClosed then error "Tab changed before it could be closed"')
     lines.append('return "OK"')
     if user_script('\n'.join(lines)).strip() != 'OK':
         raise RuntimeError('Browser did not confirm closing the forbidden tab')
 
 
 
-def close_tabs(targets):
+def close_tabs(targets, *, require_unchanged=False):
     for attempt in range(3):
         try:
-            return _close_tabs(targets)
+            return _close_tabs(targets, require_unchanged=require_unchanged)
         except RuntimeError as error:
             transient = any(code in str(error) for code in ('(-1719)', '(-1728)', '(-600)'))
             timeout = isinstance(error, BrowserScriptTimeout)
