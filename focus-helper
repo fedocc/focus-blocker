@@ -498,7 +498,7 @@ def dismiss_accidental_youtube_home(current, scope, denied):
             len(denied) != 1):
         return None
     tab = denied[0]
-    if (tab['application'] != 'Arc' or tab['kind'] != 'id' or
+    if (tab['application'] not in ('Arc', 'Dia') or tab['kind'] != 'id' or
             tab['url'] not in ('https://youtube.com/', 'https://www.youtube.com/')):
         return None
     try:
@@ -514,7 +514,7 @@ def dismiss_accidental_youtube_home(current, scope, denied):
     # At most once per existing session. Keep the reservation and both deadlines.
     current['home_dismissed'] = True
     youtube.atomic_json(STATE, current)
-    youtube.record_event('home_dismissed', 'Главная YouTube закрыта; таймер выбранного видео продолжается', {'Arc'})
+    youtube.record_event('home_dismissed', 'Главная YouTube закрыта; таймер выбранного видео продолжается', {tab['application']})
     return report
 
 

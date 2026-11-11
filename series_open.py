@@ -6,6 +6,8 @@ import sys
 import datetime as dt
 from zoneinfo import ZoneInfo
 
+from focus_open import default_browser_app, open_url
+
 HELPER = '/Library/PrivilegedHelperTools/focus-open/focus-helper'
 
 def main():
@@ -24,7 +26,7 @@ def main():
     until = dt.datetime.fromtimestamp(state['window_end'], ZoneInfo('Europe/Moscow'))
     print('Доступ к сайту до ' + until.strftime('%H:%M') + ' по Москве.')
     if '--status' not in sys.argv:
-        subprocess.run(['/usr/bin/open', '-a', 'Arc', state['site_url']], check=True)
+        open_url(state['site_url'], default_browser_app())
     return 0
 
 if __name__ == '__main__':

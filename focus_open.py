@@ -33,7 +33,16 @@ YOUTUBE_BUFFER_SECONDS = 2 * 60
 YOUTUBE_METADATA_TIMEOUT_SECONDS = 12
 YOUTUBE_MAX_ACCESS_SECONDS = 90 * 60
 MANUAL_MAX_SECONDS = 30 * 60
-DEFAULT_BROWSER_APP = "Arc"
+# These bundle IDs match the browsers supported by the installed tab observer.
+BROWSER_BUNDLE_IDS = {
+    "Arc": "company.thebrowser.Browser",
+    "Dia": "company.thebrowser.dia",
+    "Google Chrome": "com.google.Chrome",
+    "Google Chrome Canary": "com.google.Chrome.canary",
+    "Microsoft Edge": "com.microsoft.edgemac",
+    "Brave Browser": "com.brave.Browser",
+    "Safari": "com.apple.Safari",
+}
 BROWSER_GUARD_SERVICES = {"youtube", "instagram", "x", "tiktok"}
 MIN_REASON_CHARS = 12
 MIN_REASON_WORDS = 5
@@ -298,13 +307,30 @@ def telegram_used_today(state: dict[str, Any], now: dt.datetime) -> bool:
 
 def default_browser_app() -> str:
     script = ('ObjC.import("AppKit"); '
-              '$.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL('
-              '$.NSURL.URLWithString("https://web.telegram.org/")).path.js')
-    result = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", script],
-                            capture_output=True, text=True, timeout=10)
+              'const app = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL('
+              '$.NSURL.URLWithString("https://example.com/")); '
+              'ObjC.unwrap($.NSBundle.bundleWithURL(app).bundleIdentifier)')
+    try:
+        result = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e", script],
+                                capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise FocusOpenError("Не удалось определить браузер по умолчанию.") from error
     if result.returncode != 0 or not result.stdout.strip():
         raise FocusOpenError("Не удалось определить браузер по умолчанию.")
-    return Path(result.stdout.strip()).stem
+    bundle_id = result.stdout.strip()
+    for name, supported_id in BROWSER_BUNDLE_IDS.items():
+        if bundle_id == supported_id:
+            return name
+    raise FocusOpenError(f"Наблюдатель не поддерживает браузер по умолчанию ({bundle_id}).")
+
+
+def guarded_browser_app(requested: str | None = None, guard_disabled: bool = False) -> str:
+    if guard_disabled:
+        raise FocusOpenError("Контроль вкладок обязателен.")
+    browser = default_browser_app()
+    if requested is not None and requested != browser:
+        raise FocusOpenError(f"Для защищённой ссылки используется браузер по умолчанию: {browser}.")
+    return browser
 
 
 def run_telegram(set_minutes: int | None = None) -> int:
@@ -318,6 +344,7 @@ def run_telegram(set_minutes: int | None = None) -> int:
             save_state(state)
             print(f"Telegram: {set_minutes} мин. со следующей сессии.")
             return 0
+        browser_app = guarded_browser_app()
         now = now_local()
         if not require_service_slot(state, 'telegram'):
             return 1
@@ -341,7 +368,7 @@ def run_telegram(set_minutes: int | None = None) -> int:
             raise
         state["history"][-1]["access_granted"] = True
         save_state(state)
-        open_url(TELEGRAM_URL)  # macOS default browser; cookies/profile untouched.
+        open_url(TELEGRAM_URL, browser_app)
         print(f"Telegram unlocked for {minutes} minutes.")
     return 0
 
@@ -776,7 +803,7 @@ def open_app(app_name: str) -> None:
 
 def open_url(url: str, browser_app: str | None = None) -> None:
     controlled_domains = {host for service in BROWSER_GUARD_SERVICES for host in SERVICES[service].allowed_domains}
-    if browser_app == DEFAULT_BROWSER_APP and (urlparse(url).hostname or "") in controlled_domains:
+    if browser_app == "Arc" and (urlparse(url).hostname or "") in controlled_domains:
         if urlparse(url).path == "/playlist":
             playlist_ids = parse_qs(urlparse(url).query).get("list", [])
             for item in youtube_policy()["playlists"]:
@@ -818,7 +845,7 @@ def open_url(url: str, browser_app: str | None = None) -> None:
         return
     command = ["/usr/bin/open"]
     if browser_app:
-        command.extend(["-a", browser_app])
+        command.extend(["-b", BROWSER_BUNDLE_IDS[browser_app]])
     command.append(url)
     result = subprocess.run(command, check=False)
     if result.returncode != 0:
@@ -968,24 +995,24 @@ def youtube_target(raw_url: str | None, course: str | None, policy: dict[str, An
     return (f"https://www.youtube.com/watch?v={video_id}", {"video_id": video_id})
 
 
-def prepare_youtube_browser() -> None:
-    # Restore Arc's windows while hosts are still blocked. The root helper can
+def prepare_youtube_browser(browser_app: str) -> None:
+    # Restore the selected browser's windows before reserving a session. The root helper can
     # then remove stale YouTube tabs before it grants the requested scope.
+    bundle_id = json.dumps(BROWSER_BUNDLE_IDS[browser_app])
     script = '\n'.join([
-        'tell application "Arc"', 'activate', 'repeat 20 times',
+        'tell application id ' + bundle_id, 'activate', 'repeat 20 times',
         'if (count of windows) > 0 then exit repeat', 'delay 0.25', 'end repeat',
-        'if (count of windows) is 0 then error "Открой главное окно Arc"',
+        'if (count of windows) is 0 then error ' + json.dumps(f"Открой главное окно {browser_app}", ensure_ascii=False),
         'return "OK"', 'end tell',
     ])
     result = subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True, text=True, timeout=15)
     if result.returncode or result.stdout.strip() != "OK":
-        raise FocusOpenError(result.stderr.strip() or "Не удалось подготовить окно Arc.")
+        raise FocusOpenError(result.stderr.strip() or f"Не удалось подготовить окно {browser_app}.")
 
 
 def run_youtube(raw_url: str | None = None, course: str | None = None,
-                browser_app: str = DEFAULT_BROWSER_APP, disable_browser_guard: bool = False) -> int:
-    if browser_app != DEFAULT_BROWSER_APP or disable_browser_guard:
-        raise FocusOpenError("Контроль видео YouTube обязателен; открытие начинается в Arc.")
+                browser_app: str | None = None, disable_browser_guard: bool = False) -> int:
+    browser_app = guarded_browser_app(browser_app, disable_browser_guard)
     policy = youtube_policy()
     url, request = youtube_target(raw_url, course, policy)
     # Print before opening: these links remain in terminal scrollback even
@@ -1009,7 +1036,7 @@ def run_youtube(raw_url: str | None = None, course: str | None = None,
         if not require_service_slot(state, 'youtube', root_status):
             return 1
         helper_json("guard-check")
-        prepare_youtube_browser()
+        prepare_youtube_browser(browser_app)
         previous = json.loads(json.dumps(state))
         grant = helper_json("lease", "youtube", request)
         scope = grant["scope"]
@@ -1043,7 +1070,7 @@ def run_youtube(raw_url: str | None = None, course: str | None = None,
 def run_service(
     service_key: str,
     raw_url: str | None = None,
-    browser_app: str = DEFAULT_BROWSER_APP,
+    browser_app: str | None = None,
     disable_browser_guard: bool = False,
     url_monitor_enabled: bool = DEFAULT_URL_MONITOR_ENABLED,
     disable_browser_reopen: bool = False,
@@ -1054,8 +1081,7 @@ def run_service(
         raise FocusOpenError("Неизвестный сервис.")
     homepage = SHORT_SOCIAL_HOMES[service_key]
     seconds = SHORT_SOCIAL_SECONDS[service_key]
-    if browser_app != DEFAULT_BROWSER_APP or disable_browser_guard:
-        raise FocusOpenError("Контроль вкладок обязателен; открытие начинается в Arc.")
+    browser_app = guarded_browser_app(browser_app, disable_browser_guard)
     with exclusive_lock():
         state = load_state()
         current_time = now_local()
@@ -1149,8 +1175,12 @@ def print_doctor() -> int:
     for key, config in PERMANENT_BLOCKS.items():
         print(f"{config.display_name}: permanent hosts {service_block_status(key)}")
 
-    print(f"{DEFAULT_BROWSER_APP}.app: {'found' if app_exists(DEFAULT_BROWSER_APP) else 'not found'}")
-    print(f"{DEFAULT_BROWSER_APP} running: {app_is_running(DEFAULT_BROWSER_APP)}")
+    try:
+        browser = default_browser_app()
+        print(f"Браузер по умолчанию: {browser}")
+        print(f"{browser} running: {app_is_running(browser)}")
+    except FocusOpenError as error:
+        print(str(error))
     print(f"browser guard services: {', '.join(sorted(BROWSER_GUARD_SERVICES))}")
     print(f"url monitor default: {DEFAULT_URL_MONITOR_ENABLED}")
     return 0
@@ -1195,14 +1225,14 @@ def build_parser() -> argparse.ArgumentParser:
     youtube_parser.add_argument("--course", metavar="COURSE")
     youtube_parser.add_argument("--courses", action="store_true")
     youtube_parser.add_argument('--stop', action='store_true')
-    youtube_parser.add_argument("--browser-app", default=DEFAULT_BROWSER_APP)
+    youtube_parser.add_argument("--browser-app")
     youtube_parser.add_argument("--no-browser-guard", action="store_true")
     youtube_parser.add_argument("--no-browser-reopen", action="store_true")
     youtube_parser.add_argument("--url-monitor", action="store_true")
 
     for key in SHORT_SOCIAL_HOMES:
         social_parser = subparsers.add_parser(key)
-        social_parser.add_argument("--browser-app", default=DEFAULT_BROWSER_APP)
+        social_parser.add_argument("--browser-app")
         social_parser.add_argument("--no-browser-guard", action="store_true")
         social_parser.add_argument("--no-browser-reopen", action="store_true")
         social_parser.add_argument("--url-monitor", action="store_true")
@@ -1211,7 +1241,7 @@ def build_parser() -> argparse.ArgumentParser:
     open_parser = subparsers.add_parser("open")
     open_parser.add_argument("--service", required=True, choices=sorted(BROWSER_GUARD_SERVICES))
     open_parser.add_argument("--url", required=True)
-    open_parser.add_argument("--browser-app", default=DEFAULT_BROWSER_APP)
+    open_parser.add_argument("--browser-app")
     open_parser.add_argument("--no-browser-guard", action="store_true")
     open_parser.add_argument("--no-browser-reopen", action="store_true")
     open_parser.add_argument("--url-monitor", action="store_true")

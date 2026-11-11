@@ -567,14 +567,14 @@ class RootIntegrationTests(unittest.TestCase):
         self.assertIn(helper.PREFIX,helper.HOSTS.read_text())
         self.force.assert_not_called()
 
-    def test_one_accidental_arc_homepage_keeps_the_existing_video_and_deadline(self):
+    def test_one_accidental_dia_homepage_keeps_the_existing_video_and_deadline(self):
         self.regular()
         before = helper.read_lease()
         guard.USAGE.write_text(json.dumps({'counts': {OTHER: 1}, 'last_regular_opened_at': before['started_at']}))
         usage = guard.USAGE.read_bytes()
         selected = 'https://youtu.be/' + OTHER
         home = 'https://www.youtube.com/'
-        self.report.side_effect = [self.tabs(selected, home), self.tabs(selected)]
+        self.report.side_effect = [self.tabs(selected, home, name='Dia'), self.tabs(selected, name='Dia')]
         self.assertTrue(helper.guard_cycle())
         self.assertEqual([tab['url'] for tab in self.close.call_args.args[0]], [home])
         self.assertTrue(self.close.call_args.kwargs['require_unchanged'])
@@ -583,7 +583,7 @@ class RootIntegrationTests(unittest.TestCase):
             self.assertEqual(current[key], before[key])
         self.assertEqual(guard.USAGE.read_bytes(), usage)
 
-        self.report.side_effect = [self.tabs(selected, home), self.tabs(selected, home), []]
+        self.report.side_effect = [self.tabs(selected, home, name='Dia'), self.tabs(selected, home, name='Dia'), []]
         self.assertTrue(helper.guard_cycle())
         self.assertIsNone(helper.read_lease())
         self.assertEqual(guard.USAGE.read_bytes(), usage)
@@ -1013,7 +1013,8 @@ class ClientIntegrationTests(unittest.TestCase):
         self.base=Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.stack.enter_context(patch.multiple(client,STATE_DIR=self.base,STATE_PATH=self.base/'state.json',LOCK_PATH=self.base/'lock',YOUTUBE_POLICY_PATH=STAGE/'youtube-policy.json'))
         self.open=self.stack.enter_context(patch.object(client,'open_url'))
-        self.stack.enter_context(patch.object(client,'prepare_youtube_browser'))
+        self.stack.enter_context(patch.object(client,'default_browser_app',return_value='Dia'))
+        self.prepare=self.stack.enter_context(patch.object(client,'prepare_youtube_browser'))
         self.stack.enter_context(patch.object(client,'restore_all_hosts_blocks'))
 
     def test_active_additional_service_does_not_prompt_or_consume_another_day(self):
@@ -1070,7 +1071,7 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(client.run_service('instagram'),0)
         self.assertLess(events.index('stop'),events.index('grant instagram'))
         self.assertIn('YouTube',question.call_args.args[0])
-        self.open.assert_called_once_with('https://www.instagram.com/','Arc')
+        self.open.assert_called_once_with('https://www.instagram.com/','Dia')
         after=client.load_state()
         self.assertEqual(after['services']['youtube'],before['services']['youtube'])
         self.assertEqual(after['history'][0]['closing_reason'],'stopped')
@@ -1135,6 +1136,7 @@ class ClientIntegrationTests(unittest.TestCase):
         with patch.object(client,'helper_json',side_effect=rpc),patch.object(client,'helper_command') as command,patch('builtins.input',return_value='да'),contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(client.run_telegram(),0)
         command.assert_any_call('lease','telegram','420')
+        self.open.assert_called_once_with(client.TELEGRAM_URL,'Dia')
 
     def test_eof_or_interrupt_never_approves_session_switch(self):
         for error in (EOFError(),KeyboardInterrupt()):
@@ -1154,7 +1156,7 @@ class ClientIntegrationTests(unittest.TestCase):
             client.run_youtube(course='dl')
         rpc.assert_called_once_with('guard-check')
         self.assertEqual(client.STATE_PATH.read_bytes(),previous)
-        self.open.assert_called_once_with(client.youtube_course_entry(COURSE),'Arc')
+        self.open.assert_called_once_with(client.youtube_course_entry(COURSE),'Dia')
 
     def test_whole_channel_shortcut_opens_without_lease_or_daily_limit_change(self):
         before={'services':{'youtube':{'last_opened_at':client.now_local().isoformat()}},'history':[]}
@@ -1163,7 +1165,7 @@ class ClientIntegrationTests(unittest.TestCase):
             client.run_youtube(course='seminars')
         rpc.assert_called_once_with('guard-check')
         self.assertEqual(client.STATE_PATH.read_bytes(),previous)
-        self.open.assert_called_once_with(client.youtube_channel_entry(POLICY['channels'][0]),'Arc')
+        self.open.assert_called_once_with(client.youtube_channel_entry(POLICY['channels'][0]),'Dia')
 
     def test_video_outside_original_seminar_playlist_is_permanent(self):
         client.save_state({'services':{'youtube':{'last_opened_at':client.now_local().isoformat()}},'history':[]})
@@ -1190,6 +1192,8 @@ class ClientIntegrationTests(unittest.TestCase):
         with patch.object(client,'helper_json',side_effect=[{'lease':None},{},{'deadline':time.time()+720,'scope':scope}]) as rpc,patch.object(client,'get_youtube_duration_seconds',return_value=None),contextlib.redirect_stdout(output):
             client.run_youtube('https://youtu.be/'+OTHER)
         self.assertEqual(rpc.call_args.args,('lease','youtube',{'video_id':OTHER}))
+        self.prepare.assert_called_once_with('Dia')
+        self.open.assert_called_once_with('https://www.youtube.com/watch?v='+OTHER,'Dia')
         self.assertIn(client.youtube_course_entry(COURSE),output.getvalue())
         self.assertIn('Автоблокировка:',output.getvalue())
 
@@ -1197,7 +1201,7 @@ class ClientIntegrationTests(unittest.TestCase):
         with patch.object(client,'helper_command') as command,patch.object(client,'helper_json',return_value={}),patch.object(client,'prompt_text',side_effect=AssertionError('unexpected link prompt')):
             self.assertEqual(client.main(['tiktok']),0)
         self.assertEqual(command.call_args.args,('lease','tiktok','300'))
-        self.open.assert_called_once_with('https://www.tiktok.com/','Arc')
+        self.open.assert_called_once_with('https://www.tiktok.com/','Dia')
         self.assertEqual(client.load_state()['history'][-1]['duration_seconds'],300)
         self.assertTrue(client.validate_url('tiktok','https://www.tiktok.com/@example').allowed)
         self.assertFalse(client.validate_url('tiktok','https://tiktok.com.evil.test/').allowed)
@@ -1206,7 +1210,7 @@ class ClientIntegrationTests(unittest.TestCase):
         with patch.object(client,'helper_command') as command,patch.object(client,'helper_json',return_value={}),patch.object(client,'prompt_text',side_effect=AssertionError('unexpected link prompt')):
             self.assertEqual(client.main(['x']),0)
         self.assertEqual(command.call_args.args,('lease','x','120'))
-        self.open.assert_called_once_with('https://x.com/','Arc')
+        self.open.assert_called_once_with('https://x.com/','Dia')
         state=client.load_state()
         self.assertEqual(state['history'][-1]['service'],'x')
         self.assertEqual(state['history'][-1]['duration_seconds'],120)

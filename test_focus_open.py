@@ -125,13 +125,27 @@ class FocusOpenPureFunctionTests(unittest.TestCase):
     def test_youtube_buffer_is_two_minutes(self):
         self.assertEqual(focus_open.YOUTUBE_BUFFER_SECONDS, 2 * 60)
 
-    def test_browser_guard_defaults_to_arc_without_url_monitor(self):
-        self.assertEqual(focus_open.DEFAULT_BROWSER_APP, "Arc")
+    def test_browser_guard_is_enabled_without_the_legacy_url_monitor(self):
         self.assertTrue(focus_open.should_use_browser_guard("youtube", disabled=False))
         self.assertTrue(focus_open.should_use_browser_guard("instagram", disabled=False))
         self.assertFalse(focus_open.should_use_browser_guard("youtube", disabled=True))
         self.assertFalse(focus_open.should_use_browser_guard("instagram", disabled=True))
         self.assertFalse(focus_open.DEFAULT_URL_MONITOR_ENABLED)
+
+    def test_browser_choice_follows_the_current_macos_default_and_rejects_unobserved_apps(self):
+        handlers = [SimpleNamespace(returncode=0, stdout=bundle) for bundle in
+                    ('company.thebrowser.dia', 'com.apple.Safari', 'org.mozilla.firefox')]
+        with patch.object(focus_open.subprocess, 'run', side_effect=handlers):
+            self.assertEqual(focus_open.guarded_browser_app(), 'Dia')
+            self.assertEqual(focus_open.guarded_browser_app(), 'Safari')
+            with self.assertRaisesRegex(focus_open.FocusOpenError, 'не поддерживает'):
+                focus_open.guarded_browser_app()
+
+    def test_dia_links_open_by_the_observed_bundle_id(self):
+        url = 'https://www.youtube.com/watch?v=jIiTbllBF4Q'
+        with patch.object(focus_open.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as run:
+            focus_open.open_url(url, 'Dia')
+        self.assertEqual(run.call_args.args[0], ['/usr/bin/open', '-b', 'company.thebrowser.dia', url])
 
     def test_browser_reopen_policy(self):
         self.assertTrue(focus_open.should_reopen_browser_after_guard(browser_guard=True, was_running=True, disabled=False))
