@@ -336,8 +336,9 @@ def daily_available():
             result[service] = False
         else:
             result[service] = True
-    last = youtube.read_usage().get('last_regular_opened_at')
-    result['youtube'] = last is None or socials.day_at(now) > socials.day_at(float(last))
+    youtube_usage = youtube.read_usage()
+    result['youtube'] = youtube.daily_slot_available(youtube_usage, 'last_regular_opened_at', now)
+    result['youtube_feed'] = youtube.daily_slot_available(youtube_usage, 'last_feed_opened_at', now)
     return result
 
 
@@ -384,8 +385,12 @@ def lease(service, seconds, youtube_scope=None):
             raise RuntimeError('Ручные исключения запрещены владельцем. Действуют обычные дневные лимиты.')
     if service not in TEMPORARY_SERVICES or isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 21600:
         raise ValueError('Invalid lease')
-    if service == 'youtube' and (not youtube_scope or youtube_scope.get('mode') != 'video'):
-        raise ValueError('Only ordinary video access needs a temporary lease')
+    if service == 'youtube':
+        mode = (youtube_scope or {}).get('mode')
+        if mode not in ('video', 'feed'):
+            raise ValueError('A temporary YouTube lease requires a video or feed scope')
+        if mode == 'feed' and (seconds != youtube.FEED_SECONDS or youtube_scope.get('allowed_ids') != []):
+            raise ValueError('Лента YouTube доступна ровно на 5 минут.')
     now = time.time()
     previous = None
     if service in socials.DURATIONS:
@@ -462,7 +467,17 @@ def manual_override_forbidden(current):
         seconds = socials.DURATIONS[service]
         return (abs(current.get('deadline', 0) - current.get('started_at', 0) - seconds) > .01 or
                 abs(current.get('deadline_monotonic', 0) - current.get('started_monotonic', 0) - seconds) > .01)
-    return 'temporary_full_access' in current.get('youtube_scope', {})
+    scope = current.get('youtube_scope', {})
+    if scope.get('mode') == 'feed':
+        seconds = youtube.FEED_SECONDS
+        fields = ('started_at', 'deadline', 'started_monotonic', 'deadline_monotonic')
+        times = [current.get(key) for key in fields]
+        if (current.get('timer_clock') != 'system_monotonic_v1' or scope.get('allowed_ids') != [] or
+                any(type(value) not in (float, int) or not math.isfinite(value) for value in times) or
+                abs(current['deadline'] - current['started_at'] - seconds) > .01 or
+                abs(current['deadline_monotonic'] - current['started_monotonic'] - seconds) > .01):
+            return True
+    return 'temporary_full_access' in scope
 
 
 def expire():
@@ -601,6 +616,9 @@ def guard_cycle():
         # browser. Opening an approved lecture needs no command or renewal.
         if observer_errors:
             set_access('youtube', False)
+            if current and current['service'] == 'youtube' and scope['mode'] == 'feed':
+                revoke_lease()
+                current = None
             # Reset cached denied connections only in the failed browser. The
             # healthy Arc carrying Telegram is not selected for a Chrome error.
             blocked = {'youtube'} | (set(SOCIAL_SERVICES) - lease_services(current))
@@ -790,9 +808,13 @@ def main():
                 youtube.publish_health(True)  # This complete snapshot was verified now.
                 started = time.time()
                 usage = copy.deepcopy(previous)
-                usage['last_regular_opened_at'] = started
-                counts = usage.setdefault('counts', {})
-                counts[scope['allowed_ids'][0]] = counts.get(scope['allowed_ids'][0], 0) + 1
+                if scope['mode'] == 'feed':
+                    usage['last_feed_opened_at'] = started
+                else:
+                    usage['last_regular_opened_at'] = started
+                    counts = usage.setdefault('counts', {})
+                    video_id = scope['allowed_ids'][0]
+                    counts[video_id] = counts.get(video_id, 0) + 1
                 youtube.atomic_json(youtube.USAGE, usage)
                 try:
                     value = lease('youtube', scope['seconds'], scope)

@@ -29,6 +29,7 @@ CHANNEL_ID = re.compile(r'^UC[A-Za-z0-9_-]{22}$')
 COOLDOWN = 6 * 60 * 60
 VIDEO_FALLBACK_SECONDS = 12 * 60
 VIDEO_BUFFER_SECONDS = 120
+FEED_SECONDS = 5 * 60
 SCRIPT_TIMEOUT = 5
 BROWSERS = {
     'Arc': ('company.thebrowser.Browser', 'id'),
@@ -115,6 +116,11 @@ def read_usage():
     return json.loads(USAGE.read_text()) if USAGE.exists() else {'last_regular_opened_at': None, 'counts': {}}
 
 
+def daily_slot_available(usage, key, now):
+    last = usage.get(key)
+    return last is None or day_at(now) > day_at(float(last))
+
+
 def study_scope(policy, playlist_id=None):
     playlists = policy['playlists']
     channels = policy.get('channels', [])
@@ -173,6 +179,16 @@ def verified_video_seconds(video_id, fetch=None):
 def make_scope(request, policy, usage, now, *, verified_seconds=None):
     if not isinstance(request, dict):
         raise ValueError('YouTube requires a specific video or an approved playlist')
+    if 'feed' in request:
+        if set(request) != {'feed'} or request['feed'] is not True:
+            raise ValueError('Для ленты YouTube действует фиксированный доступ на 5 минут.')
+        if not daily_slot_available(usage, 'last_feed_opened_at', now):
+            raise RuntimeError('Лента YouTube уже открывалась сегодня. Следующий доступ — после полуночи по Москве.')
+        study = study_scope(policy)
+        return {'mode': 'feed', 'allowed_ids': [], 'seconds': FEED_SECONDS,
+                'study_ids': study['allowed_ids'], 'playlist_ids': study['playlist_ids'],
+                'channel_ids': study.get('channel_ids', []), 'channel_paths': study.get('channel_paths', []),
+                'channel_video_ids': study.get('channel_video_ids', [])}
     playlist_id = request.get('playlist_id')
     video_id = request.get('video_id')
     channel_id = request.get('channel_id')
@@ -201,8 +217,7 @@ def make_scope(request, policy, usage, now, *, verified_seconds=None):
         raise ValueError('This playlist is not approved')
     if not video_id:
         raise ValueError('YouTube requires a specific video ID')
-    last = usage.get('last_regular_opened_at')
-    if last is not None and day_at(now) <= day_at(float(last)):
+    if not daily_slot_available(usage, 'last_regular_opened_at', now):
         raise RuntimeError('YouTube уже открывался сегодня; новое обычное видео доступно после полуночи по Москве.')
     if int(usage.get('counts', {}).get(video_id, 0)) >= 2:
         raise RuntimeError('Эта ссылка уже использована 2 раза. Повторный доступ закрыт.')
@@ -283,6 +298,12 @@ def url_allowed(scope, value):
         return False
     if is_youtube_url(value) and temporary_full_access_active(scope):
         return True
+    if scope['mode'] == 'feed' and parsed.scheme == 'https' and parsed.netloc.lower() in ('youtube.com', 'www.youtube.com'):
+        if not parsed.params and not parsed.fragment:
+            if parsed.path in ('', '/') and not parsed.query:
+                return True
+            if parsed.path == '/playlist' and parsed.query == 'list=WL':
+                return True
     params = parse_qs(parsed.query)
     if host in ('youtube.com', 'www.youtube.com', 'm.youtube.com'):
         path = parsed.path.rstrip('/')

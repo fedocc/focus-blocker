@@ -74,6 +74,20 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             guard.make_scope({'video_id': OTHER}, POLICY, {'last_regular_opened_at': 1000}, 1001)
 
+    def test_feed_allows_home_and_watch_later_but_no_new_video_pages(self):
+        scope = guard.make_scope({'feed': True}, POLICY, {}, 1000)
+        self.assertEqual(scope['seconds'], 300)
+        for url in ('https://www.youtube.com/', 'https://www.youtube.com/playlist?list=WL',
+                    'https://www.youtube.com/watch?v=' + VIDEO):
+            self.assertTrue(guard.url_allowed(scope, url), url)
+        for suffix in ('/watch?v=' + OTHER + '&list=WL', '/playlist?list=another',
+                       '/playlist?list=WL&list=another', '/playlist?list=WL&v=' + OTHER,
+                       '/embed/' + VIDEO, '/shorts/' + OTHER, '/results?search_query=test'):
+            self.assertFalse(guard.url_allowed(scope, 'https://www.youtube.com' + suffix), suffix)
+        for request in ({'feed': 1}, {'feed': True, 'seconds': 301}, {'feed': True, 'video_id': OTHER}):
+            with self.assertRaises(ValueError):
+                guard.make_scope(request, POLICY, {}, 1000)
+
     def test_permanent_study_whitelist_survives_an_ordinary_video_session(self):
         scope = guard.make_scope({'video_id': OTHER}, POLICY, {}, 1000)
         self.assertTrue(guard.url_allowed(scope, 'https://www.youtube.com/watch?v=' + VIDEO))
@@ -779,11 +793,44 @@ class RootIntegrationTests(unittest.TestCase):
         self.assertIn(helper.PREFIX+'127.0.0.1 telegram.test',helper.HOSTS.read_text())
         self.force.assert_not_called()
 
-    def request_video(self):
+    def request_video(self, *, feed=False):
         output=io.StringIO()
-        with patch.object(sys,'argv',['focus-helper','lease','youtube']),patch.object(sys,'stdin',io.StringIO(json.dumps({'video_id':OTHER}))),patch.object(helper.os,'geteuid',return_value=0),contextlib.redirect_stdout(output):
+        request = {'feed': True} if feed else {'video_id': OTHER}
+        with patch.object(sys,'argv',['focus-helper','lease','youtube']),patch.object(sys,'stdin',io.StringIO(json.dumps(request))),patch.object(helper.os,'geteuid',return_value=0),contextlib.redirect_stdout(output):
             helper.main()
         return json.loads(output.getvalue())
+
+    def test_feed_expires_closes_only_non_study_tabs_and_keeps_separate_daily_usage(self):
+        (self.base / 'no-manual-overrides').touch()
+        grant = self.request_video(feed=True)
+        current = helper.read_lease()
+        self.assertEqual(grant['deadline'] - current['started_at'], 300)
+        self.assertEqual(current['deadline_monotonic'] - current['started_monotonic'], 300)
+        self.assertFalse(helper.manual_override_forbidden(current))
+        self.assertTrue(helper.manual_override_forbidden(dict(current, deadline=current['deadline'] + 1)))
+        self.assertTrue(helper.daily_available()['youtube'])
+        self.assertFalse(helper.daily_available()['youtube_feed'])
+        lecture = 'https://www.youtube.com/watch?v=' + VIDEO
+        pages = ['https://www.youtube.com/', 'https://www.youtube.com/playlist?list=WL']
+        self.report.side_effect = [self.tabs(lecture, *pages, name='Dia'), self.tabs(lecture, name='Dia')]
+        with patch.object(helper, 'lease_clock', return_value=current['deadline_monotonic']):
+            helper.expire()
+        self.assertIsNone(helper.read_lease())
+        self.assertEqual([tab['url'] for tab in self.close.call_args.args[0]], pages)
+        self.force.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, 'после полуночи'):
+            self.request_video(feed=True)
+        usage = guard.read_usage()
+        self.assertEqual(usage['counts'], {})
+        self.assertTrue(guard.daily_slot_available(usage, 'last_feed_opened_at', current['started_at'] + 86400))
+
+    def test_feed_refuses_to_replace_an_existing_lease_and_does_not_consume_quota(self):
+        self.regular()
+        previous = helper.read_lease()
+        with self.assertRaisesRegex(RuntimeError, 'Another temporary lease'):
+            self.request_video(feed=True)
+        self.assertEqual(helper.read_lease(), previous)
+        self.assertTrue(helper.daily_available()['youtube_feed'])
 
     def test_slow_preparation_cannot_make_its_own_timer_appear_dead(self):
         import os
@@ -1196,6 +1243,18 @@ class ClientIntegrationTests(unittest.TestCase):
         self.open.assert_called_once_with('https://www.youtube.com/watch?v='+OTHER,'Dia')
         self.assertIn(client.youtube_course_entry(COURSE),output.getvalue())
         self.assertIn('Автоблокировка:',output.getvalue())
+
+    def test_feed_command_uses_dia_and_its_own_quota_without_prompting_for_video(self):
+        scope = guard.make_scope({'feed': True}, POLICY, {}, time.time())
+        status = {'lease': None, 'daily_available': {'youtube': False, 'youtube_feed': True}}
+        grant = {'deadline': time.time() + 300, 'scope': scope}
+        output = io.StringIO()
+        with patch.object(client, 'helper_json', side_effect=[status, {}, grant]) as rpc, contextlib.redirect_stdout(output):
+            self.assertEqual(client.main(['youtube', '--feed']), 0)
+        self.assertEqual(rpc.call_args.args, ('lease', 'youtube', {'feed': True}))
+        self.open.assert_called_once_with(client.YOUTUBE_FEED_URL, 'Dia')
+        self.assertIn(client.YOUTUBE_WATCH_LATER_URL, output.getvalue())
+        self.assertNotIn('youtube', client.load_state()['services'])
 
     def test_tiktok_cli_requests_only_five_minutes_without_link_prompt(self):
         with patch.object(client,'helper_command') as command,patch.object(client,'helper_json',return_value={}),patch.object(client,'prompt_text',side_effect=AssertionError('unexpected link prompt')):
