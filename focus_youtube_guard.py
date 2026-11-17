@@ -30,6 +30,9 @@ COOLDOWN = 6 * 60 * 60
 VIDEO_FALLBACK_SECONDS = 12 * 60
 VIDEO_BUFFER_SECONDS = 120
 FEED_SECONDS = 5 * 60
+BROWSING_MODES = ('feed', 'saved')
+LIBRARY_PAGES = ('/feed/you', '/feed/playlists', '/feed/history')
+LIBRARY_PLAYLIST_QUERY = re.compile(r'list=(?:WL|LL|PL[A-Za-z0-9_-]{8,78})')
 SCRIPT_TIMEOUT = 5
 BROWSERS = {
     'Arc': ('company.thebrowser.Browser', 'id'),
@@ -179,13 +182,14 @@ def verified_video_seconds(video_id, fetch=None):
 def make_scope(request, policy, usage, now, *, verified_seconds=None):
     if not isinstance(request, dict):
         raise ValueError('YouTube requires a specific video or an approved playlist')
-    if 'feed' in request:
-        if set(request) != {'feed'} or request['feed'] is not True:
-            raise ValueError('Для ленты YouTube действует фиксированный доступ на 5 минут.')
+    browsing = next((mode for mode in BROWSING_MODES if mode in request), None)
+    if browsing:
+        if set(request) != {browsing} or request[browsing] is not True:
+            raise ValueError('Для ленты и списков YouTube действует фиксированный доступ на 5 минут.')
         if not daily_slot_available(usage, 'last_feed_opened_at', now):
-            raise RuntimeError('Лента YouTube уже открывалась сегодня. Следующий доступ — после полуночи по Москве.')
+            raise RuntimeError('Пять минут на ленту и списки YouTube уже использованы. Следующий доступ — после полуночи по Москве.')
         study = study_scope(policy)
-        return {'mode': 'feed', 'allowed_ids': [], 'seconds': FEED_SECONDS,
+        return {'mode': browsing, 'allowed_ids': [], 'seconds': FEED_SECONDS,
                 'study_ids': study['allowed_ids'], 'playlist_ids': study['playlist_ids'],
                 'channel_ids': study.get('channel_ids', []), 'channel_paths': study.get('channel_paths', []),
                 'channel_video_ids': study.get('channel_video_ids', [])}
@@ -298,11 +302,13 @@ def url_allowed(scope, value):
         return False
     if is_youtube_url(value) and temporary_full_access_active(scope):
         return True
-    if scope['mode'] == 'feed' and parsed.scheme == 'https' and parsed.netloc.lower() in ('youtube.com', 'www.youtube.com'):
+    if scope['mode'] in BROWSING_MODES and parsed.scheme == 'https' and parsed.netloc.lower() in ('youtube.com', 'www.youtube.com'):
         if not parsed.params and not parsed.fragment:
-            if parsed.path in ('', '/') and not parsed.query:
+            if scope['mode'] == 'feed' and parsed.path in ('', '/') and not parsed.query:
                 return True
-            if parsed.path == '/playlist' and parsed.query == 'list=WL':
+            if parsed.path in LIBRARY_PAGES and not parsed.query:
+                return True
+            if parsed.path == '/playlist' and LIBRARY_PLAYLIST_QUERY.fullmatch(parsed.query):
                 return True
     params = parse_qs(parsed.query)
     if host in ('youtube.com', 'www.youtube.com', 'm.youtube.com'):

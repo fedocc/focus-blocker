@@ -53,6 +53,8 @@ TELEGRAM_URL = "https://web.telegram.org/"
 TELEGRAM_DEFAULT_MINUTES = 7
 YOUTUBE_FEED_URL = "https://www.youtube.com/"
 YOUTUBE_WATCH_LATER_URL = "https://www.youtube.com/playlist?list=WL"
+YOUTUBE_PLAYLISTS_URL = "https://www.youtube.com/feed/playlists"
+YOUTUBE_HISTORY_URL = "https://www.youtube.com/feed/history"
 INSTAGRAM_URL = "https://www.instagram.com/"
 INSTAGRAM_ACCESS_SECONDS = 2 * 60
 X_URL = "https://x.com/"
@@ -617,18 +619,20 @@ def record_session_end(state: dict[str, Any], lease: dict[str, Any], stopped: bo
 
 
 def require_service_slot(state: dict[str, Any], target: str, root_status: dict[str, Any] | None = None,
-                         *, youtube_feed: bool = False) -> bool:
+                         *, youtube_browsing: bool = False) -> bool:
     status = root_status if root_status is not None else helper_json('youtube-status')
     lease = status.get('lease')
-    if lease and target in {lease['service'], *lease.get('additional_services', [])}:
+    selecting_video = (target == 'youtube' and not youtube_browsing and lease and
+                       lease['service'] == 'youtube' and lease.get('youtube_scope', {}).get('mode') in ('feed', 'saved'))
+    if lease and not selecting_video and target in {lease['service'], *lease.get('additional_services', [])}:
         print(SERVICES[target].display_name + ' уже открыт. Завершить сессию: focus-open stop')
         return False
     available = status.get('daily_available', {})
-    if youtube_feed:
+    if youtube_browsing:
         if 'youtube_feed' not in available:
             raise FocusOpenError('Системный помощник ещё не поддерживает режим ленты YouTube.')
         if not available['youtube_feed']:
-            raise FocusOpenError('Лента YouTube уже открывалась сегодня. Следующий доступ — после полуночи по Москве.')
+            raise FocusOpenError('Пять минут на ленту и списки YouTube уже использованы. Следующий доступ — после полуночи по Москве.')
     elif target in available:
         if not available[target]:
             raise FocusOpenError(SERVICES[target].display_name + ' уже открывался сегодня. Следующий доступ — после полуночи по Москве.')
@@ -638,6 +642,8 @@ def require_service_slot(state: dict[str, Any], target: str, root_status: dict[s
         return True
     name = ', '.join(SERVICES[s].display_name for s in [lease['service'], *lease.get('additional_services', [])])
     question = f'Сейчас идёт сессия {name}. Завершить её и открыть {SERVICES[target].display_name}?'
+    if selecting_video:
+        question = 'Завершить просмотр списков YouTube и открыть выбранный ролик?'
     if not confirm(question):
         print('Текущая сессия продолжается.')
         return False
@@ -1019,11 +1025,14 @@ def prepare_youtube_browser(browser_app: str) -> None:
 
 
 def run_youtube(raw_url: str | None = None, course: str | None = None,
-                browser_app: str | None = None, disable_browser_guard: bool = False, *, feed: bool = False) -> int:
+                browser_app: str | None = None, disable_browser_guard: bool = False, *,
+                browsing: str | None = None) -> int:
     browser_app = guarded_browser_app(browser_app, disable_browser_guard)
     policy = youtube_policy()
-    if feed:
+    if browsing == 'feed':
         url, request = YOUTUBE_FEED_URL, {'feed': True}
+    elif browsing == 'saved':
+        url, request = YOUTUBE_WATCH_LATER_URL, {'saved': True}
     else:
         url, request = youtube_target(raw_url, course, policy)
     # Print before opening: these links remain in terminal scrollback even
@@ -1044,7 +1053,7 @@ def run_youtube(raw_url: str | None = None, course: str | None = None,
         root_status = helper_json("youtube-status")
         if int(root_status.get('usage', {}).get('counts', {}).get(request.get('video_id'), 0)) >= 2:
             raise FocusOpenError('Эта ссылка уже использована 2 раза. Повторный доступ закрыт.')
-        if not require_service_slot(state, 'youtube', root_status, youtube_feed=feed):
+        if not require_service_slot(state, 'youtube', root_status, youtube_browsing=browsing is not None):
             return 1
         helper_json("guard-check")
         prepare_youtube_browser(browser_app)
@@ -1054,7 +1063,7 @@ def run_youtube(raw_url: str | None = None, course: str | None = None,
         opened_at = now_local()
         seconds = max(1, int(grant["deadline"] - opened_at.timestamp()))
         append_history(state, "youtube", url, "Учебный плейлист" if scope["mode"] == "playlist" else "", seconds, opened_at, None)
-        if scope["mode"] in ("playlist", "feed"):
+        if scope["mode"] in ("playlist", "feed", "saved"):
             # Browsing and courses do not consume the ordinary-video day.
             previous_service = previous.get("services", {}).get("youtube")
             if previous_service is None:
@@ -1076,12 +1085,16 @@ def run_youtube(raw_url: str | None = None, course: str | None = None,
             save_state(state)
             raise
         ends_at = parse_iso_datetime(state["active_unlock"]["ends_at"])
-        print("YouTube: лента и «Смотреть позже»" if feed else "YouTube: только выбранное видео")
-        if feed:
+        if browsing:
+            print("YouTube: лента и списки" if browsing == 'feed' else "YouTube: сохранённое и история")
             print(f"Смотреть позже: {YOUTUBE_WATCH_LATER_URL}")
+            print(f"Плейлисты: {YOUTUBE_PLAYLISTS_URL}")
+            print(f"История: {YOUTUBE_HISTORY_URL}")
+        else:
+            print("YouTube: только выбранное видео")
         print(f"Автоблокировка: {ends_at.strftime('%H:%M')}.")
-        if feed:
-            print("Переход к ролику вне учебного списка завершает сеанс ленты.")
+        if browsing:
+            print("Чтобы посмотреть видео, скопируй его ссылку и вставь её в команду youtube.")
         else:
             print("Посторонний ролик закрывается. Доступ к лекциям из белого списка сохраняется.")
     return 0
@@ -1245,7 +1258,10 @@ def build_parser() -> argparse.ArgumentParser:
     youtube_mode = youtube_parser.add_mutually_exclusive_group()
     youtube_mode.add_argument("--course", metavar="COURSE")
     youtube_mode.add_argument("--courses", action="store_true")
-    youtube_mode.add_argument("--feed", action="store_true", help="Лента и «Смотреть позже» на 5 минут раз в день")
+    youtube_mode.add_argument("--feed", dest="browsing", action="store_const", const="feed",
+                              help="Лента и списки на 5 минут раз в день")
+    youtube_mode.add_argument("--saved", dest="browsing", action="store_const", const="saved",
+                              help="Смотреть позже, плейлисты и история. Общие 5 минут с --feed")
     youtube_mode.add_argument('--stop', action='store_true')
     youtube_parser.add_argument("--browser-app")
     youtube_parser.add_argument("--no-browser-guard", action="store_true")
@@ -1294,7 +1310,7 @@ def main(argv: list[str] | None = None) -> int:
                 print_youtube_return_links(youtube_policy())
                 return 0
             return run_youtube(course=args.course, browser_app=args.browser_app,
-                               disable_browser_guard=args.no_browser_guard, feed=args.feed)
+                               disable_browser_guard=args.no_browser_guard, browsing=args.browsing)
         if args.command in BROWSER_GUARD_SERVICES:
             return run_service(
                 args.command,
