@@ -338,7 +338,8 @@ def daily_available():
             result[service] = True
     youtube_usage = youtube.read_usage()
     result['youtube'] = youtube.daily_slot_available(youtube_usage, 'last_regular_opened_at', now)
-    result['youtube_feed'] = youtube.daily_slot_available(youtube_usage, 'last_feed_opened_at', now)
+    for mode, key in youtube.BROWSING_USAGE_KEYS.items():
+        result[f'youtube_{mode}'] = youtube.daily_slot_available(youtube_usage, key, now)
     return result
 
 
@@ -387,9 +388,9 @@ def lease(service, seconds, youtube_scope=None):
         raise ValueError('Invalid lease')
     if service == 'youtube':
         mode = (youtube_scope or {}).get('mode')
-        if mode != 'video' and mode not in youtube.BROWSING_MODES:
+        if mode != 'video' and mode not in youtube.BROWSING_USAGE_KEYS:
             raise ValueError('A temporary YouTube lease requires a video or browsing scope')
-        if mode in youtube.BROWSING_MODES and (seconds != youtube.FEED_SECONDS or youtube_scope.get('allowed_ids') != []):
+        if mode in youtube.BROWSING_USAGE_KEYS and (seconds != youtube.FEED_SECONDS or youtube_scope.get('allowed_ids') != []):
             raise ValueError('Лента и списки YouTube доступны ровно на 5 минут.')
     now = time.time()
     previous = None
@@ -468,7 +469,7 @@ def manual_override_forbidden(current):
         return (abs(current.get('deadline', 0) - current.get('started_at', 0) - seconds) > .01 or
                 abs(current.get('deadline_monotonic', 0) - current.get('started_monotonic', 0) - seconds) > .01)
     scope = current.get('youtube_scope', {})
-    if scope.get('mode') in youtube.BROWSING_MODES:
+    if scope.get('mode') in youtube.BROWSING_USAGE_KEYS:
         seconds = youtube.FEED_SECONDS
         fields = ('started_at', 'deadline', 'started_monotonic', 'deadline_monotonic')
         times = [current.get(key) for key in fields]
@@ -616,7 +617,7 @@ def guard_cycle():
         # browser. Opening an approved lecture needs no command or renewal.
         if observer_errors:
             set_access('youtube', False)
-            if current and current['service'] == 'youtube' and scope['mode'] in youtube.BROWSING_MODES:
+            if current and current['service'] == 'youtube' and scope['mode'] in youtube.BROWSING_USAGE_KEYS:
                 revoke_lease()
                 current = None
             # Reset cached denied connections only in the failed browser. The
@@ -808,8 +809,9 @@ def main():
                 youtube.publish_health(True)  # This complete snapshot was verified now.
                 started = time.time()
                 usage = copy.deepcopy(previous)
-                if scope['mode'] in youtube.BROWSING_MODES:
-                    usage['last_feed_opened_at'] = started
+                browsing_key = youtube.BROWSING_USAGE_KEYS.get(scope['mode'])
+                if browsing_key:
+                    usage[browsing_key] = started
                 else:
                     usage['last_regular_opened_at'] = started
                     counts = usage.setdefault('counts', {})

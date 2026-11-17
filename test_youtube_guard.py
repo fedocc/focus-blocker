@@ -74,11 +74,10 @@ class PolicyTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             guard.make_scope({'video_id': OTHER}, POLICY, {'last_regular_opened_at': 1000}, 1001)
 
-    def test_feed_allows_home_and_watch_later_but_no_new_video_pages(self):
+    def test_feed_allows_home_but_no_new_video_pages(self):
         scope = guard.make_scope({'feed': True}, POLICY, {}, 1000)
         self.assertEqual(scope['seconds'], 300)
-        for url in ('https://www.youtube.com/', 'https://www.youtube.com/playlist?list=WL',
-                    'https://www.youtube.com/watch?v=' + VIDEO):
+        for url in ('https://www.youtube.com/', 'https://www.youtube.com/watch?v=' + VIDEO):
             self.assertTrue(guard.url_allowed(scope, url), url)
         for suffix in ('/watch?v=' + OTHER + '&list=WL', '/playlist?list=another',
                        '/playlist?list=WL&list=another', '/playlist?list=WL&v=' + OTHER,
@@ -97,7 +96,7 @@ class PolicyTests(unittest.TestCase):
                        '/playlist?list=LL', '/playlist?list=PLuserPlaylist123'):
             url = 'https://www.youtube.com' + suffix
             self.assertTrue(guard.url_allowed(saved, url), url)
-            self.assertTrue(guard.url_allowed(feed, url), url)
+            self.assertFalse(guard.url_allowed(feed, url), url)
             self.assertFalse(guard.url_allowed(study, url), url)
         for suffix in ('/', '/feed/subscriptions', '/playlist?list=RD' + OTHER,
                        '/playlist?list=PLuserPlaylist123&playnext=1',
@@ -818,16 +817,25 @@ class RootIntegrationTests(unittest.TestCase):
             helper.main()
         return json.loads(output.getvalue())
 
-    def test_saved_expires_closes_library_tabs_and_shares_the_feed_quota(self):
+    def test_saved_opens_after_feed_and_expires_without_resetting_either_quota(self):
         (self.base / 'no-manual-overrides').touch()
+        self.request_video(browsing='feed')
+        helper.revoke_lease()
+        feed_started_at = guard.read_usage()['last_feed_opened_at']
+        self.assertFalse(helper.daily_available()['youtube_feed'])
+        self.assertTrue(helper.daily_available()['youtube_saved'])
         grant = self.request_video(browsing='saved')
         current = helper.read_lease()
+        saved_started_at = guard.read_usage()['last_saved_opened_at']
+        self.assertLessEqual(feed_started_at, saved_started_at)
+        self.assertLessEqual(saved_started_at, current['started_at'])
         self.assertEqual(grant['deadline'] - current['started_at'], 300)
         self.assertEqual(current['deadline_monotonic'] - current['started_monotonic'], 300)
         self.assertFalse(helper.manual_override_forbidden(current))
         self.assertTrue(helper.manual_override_forbidden(dict(current, deadline=current['deadline'] + 1)))
         self.assertTrue(helper.daily_available()['youtube'])
         self.assertFalse(helper.daily_available()['youtube_feed'])
+        self.assertFalse(helper.daily_available()['youtube_saved'])
         lecture = 'https://www.youtube.com/watch?v=' + VIDEO
         pages = ['https://www.youtube.com/feed/history', 'https://www.youtube.com/playlist?list=WL',
                  'https://www.youtube.com/playlist?list=PLuserPlaylist123']
@@ -842,8 +850,11 @@ class RootIntegrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'после полуночи'):
             self.request_video(browsing='saved')
         usage = guard.read_usage()
+        self.assertEqual(usage['last_feed_opened_at'], feed_started_at)
+        self.assertEqual(usage['last_saved_opened_at'], saved_started_at)
         self.assertEqual(usage['counts'], {})
         self.assertTrue(guard.daily_slot_available(usage, 'last_feed_opened_at', current['started_at'] + 86400))
+        self.assertTrue(guard.daily_slot_available(usage, 'last_saved_opened_at', current['started_at'] + 86400))
 
     def test_feed_refuses_to_replace_an_existing_lease_and_does_not_consume_quota(self):
         self.regular()
@@ -1274,16 +1285,20 @@ class ClientIntegrationTests(unittest.TestCase):
             self.assertEqual(client.main(['youtube', '--feed']), 0)
         self.assertEqual(rpc.call_args.args, ('lease', 'youtube', {'feed': True}))
         self.open.assert_called_once_with(client.YOUTUBE_FEED_URL, 'Dia')
-        self.assertIn(client.YOUTUBE_WATCH_LATER_URL, output.getvalue())
+        self.assertIn('youtube --saved', output.getvalue())
         self.assertNotIn('youtube', client.load_state()['services'])
 
     def test_saved_command_opens_watch_later_in_dia_and_lists_library_links(self):
-        status = {'lease': None, 'daily_available': {'youtube': False, 'youtube_feed': True}}
+        feed = {'service': 'youtube', 'started_at': time.time(), 'youtube_scope': {'mode': 'feed'}}
+        status = {'lease': feed, 'daily_available': {'youtube': False, 'youtube_feed': False, 'youtube_saved': True}}
         scope = guard.make_scope({'saved': True}, POLICY, {}, time.time())
         grant = {'deadline': time.time() + 300, 'scope': scope}
         output = io.StringIO()
-        with patch.object(client, 'helper_json', side_effect=[status, {}, grant]) as rpc, contextlib.redirect_stdout(output):
+        with (patch.object(client, 'helper_json', side_effect=[status, {'stopped': True}, {}, grant]) as rpc,
+              patch.object(client, 'confirm', return_value=True) as confirm, contextlib.redirect_stdout(output)):
             self.assertEqual(client.main(['youtube', '--saved']), 0)
+        confirm.assert_called_once()
+        self.assertEqual(rpc.call_args_list[1].args, ('stop',))
         self.assertEqual(rpc.call_args.args, ('lease', 'youtube', {'saved': True}))
         self.open.assert_called_once_with(client.YOUTUBE_WATCH_LATER_URL, 'Dia')
         self.assertIn(client.YOUTUBE_HISTORY_URL, output.getvalue())
