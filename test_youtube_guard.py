@@ -57,7 +57,9 @@ class PolicyTests(unittest.TestCase):
         before = copy.deepcopy(usage)
         scope = guard.make_scope({'playlist_id': COURSE['id']}, POLICY, usage, 1001)
         self.assertEqual(scope['mode'], 'playlist')
-        self.assertEqual(set(scope['allowed_ids']), {v['id'] for p in POLICY['playlists'] for v in p['videos']})
+        ids = {v['id'] for p in POLICY['playlists'] for v in p['videos']}
+        ids.update(v['id'] for v in POLICY['standalone_videos'])
+        self.assertEqual(set(scope['allowed_ids']), ids)
         self.assertEqual(usage, before)
 
     def test_direct_lecture_link_is_recognized_without_trusting_list_parameter(self):
@@ -65,6 +67,20 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(scope['mode'], 'playlist')
         with self.assertRaises(ValueError):
             guard.make_scope({'playlist_id': 'unapproved'}, POLICY, {}, 1000)
+
+    def test_workouts_allow_only_verified_ids_without_a_permanent_channel_or_playlist(self):
+        workout_ids = {v['id'] for v in POLICY['standalone_videos']}
+        self.assertIn('UpvF16UhaFo', workout_ids)
+        scope = guard.study_scope(POLICY)
+        for video_id in workout_ids:
+            self.assertTrue(guard.url_allowed(scope, 'https://www.youtube.com/watch?v=' + video_id))
+            request = guard.make_scope({'video_id': video_id}, POLICY, {'last_regular_opened_at': 1000}, 1001)
+            self.assertTrue(request['persistent_study'])
+            self.assertIsNone(request['seconds'])
+        for path in ('/', '/results?search_query=usp', '/@igorvoitenkofitness', '/shorts/UpvF16UhaFo',
+                     '/embed/UpvF16UhaFo', '/playlist?list=USP', '/watch?v=' + OTHER,
+                     '/watch?v=vUf6sKEHKi0'):
+            self.assertFalse(guard.url_allowed(scope, 'https://www.youtube.com' + path), path)
 
     def test_ordinary_session_allows_one_id_and_enforces_root_cooldown(self):
         scope = guard.make_scope({'video_id': OTHER, 'seconds': 120}, POLICY, {}, 1000)
@@ -1236,6 +1252,14 @@ class ClientIntegrationTests(unittest.TestCase):
         rpc.assert_called_once_with('guard-check')
         self.assertEqual(client.STATE_PATH.read_bytes(),previous)
         self.open.assert_called_once_with(client.youtube_course_entry(COURSE),'Dia')
+
+    def test_workout_opens_in_dia_without_a_lease_or_usage_write(self):
+        url = 'https://www.youtube.com/watch?v=UpvF16UhaFo'
+        with patch.object(client, 'helper_json', return_value={}) as rpc, contextlib.redirect_stdout(io.StringIO()):
+            client.run_youtube(raw_url=url)
+        rpc.assert_called_once_with('guard-check')
+        self.open.assert_called_once_with(url, 'Dia')
+        self.assertFalse(client.STATE_PATH.exists())
 
     def test_whole_channel_shortcut_opens_without_lease_or_daily_limit_change(self):
         before={'services':{'youtube':{'last_opened_at':client.now_local().isoformat()}},'history':[]}

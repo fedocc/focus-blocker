@@ -20,6 +20,17 @@ POLICY = json.loads((SOURCE / 'youtube-policy.json').read_text())
 
 
 class PolicyAndMigrationTests(unittest.TestCase):
+    def test_install_adds_exact_standalone_ids_without_replacing_existing_policy(self):
+        incoming = copy.deepcopy(POLICY)
+        current = copy.deepcopy(POLICY)
+        original = {'id': 'FUTUREabc12', 'title': 'Custom video'}
+        current['standalone_videos'] = [original]
+        merged = install.merge_policy(current, incoming)
+        self.assertEqual(merged['standalone_videos'], [original, *incoming['standalone_videos']])
+        self.assertEqual(merged['playlists'], current['playlists'])
+        self.assertEqual(merged['channels'], current['channels'])
+        self.assertEqual(install.merge_policy(merged, incoming), merged)
+
     def test_update_preserves_live_cache_custom_aliases_and_other_playlists(self):
         current = copy.deepcopy(POLICY)
         current['playlists'][1]['alias'] = 'my-seminars'

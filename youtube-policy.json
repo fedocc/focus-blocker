@@ -215,5 +215,19 @@
       "alias": "seminars",
       "uploads_playlist_id": "UUGY5mIxE-8T8BZFQVH3386Q"
     }
+  ],
+  "standalone_videos": [
+    {"id": "UpvF16UhaFo", "title": "USP · Разминка"},
+    {"id": "rPtv_VoFj9s", "title": "USP · Грудь"},
+    {"id": "c4pFF9pxzZg", "title": "USP · Осанка"},
+    {"id": "q0pX4TnQfPw", "title": "USP · Ноги"},
+    {"id": "DVMjxfJfi1c", "title": "USP · Пресс"},
+    {"id": "zXLwlRGfCMQ", "title": "USP · Руки"},
+    {"id": "oAaJJpTgIy0", "title": "USP · Планка и косые"},
+    {"id": "F84K0HCeANI", "title": "USP · Верх тела"},
+    {"id": "-tZk6m_5beQ", "title": "USP · Спина"},
+    {"id": "fG-p3lgTOa8", "title": "USP · Всё тело"},
+    {"id": "5E_pGMPDkng", "title": "USP · Плечи"},
+    {"id": "SOvsUhLCdys", "title": "USP · Спина, англоязычный ролик"}
   ]
 }

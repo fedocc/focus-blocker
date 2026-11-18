@@ -1045,13 +1045,17 @@ def run_youtube(raw_url: str | None = None, course: str | None = None,
     with exclusive_lock():
         state = load_state()
         study_ids = {v['id'] for p in policy['playlists'] for v in p['videos']}
+        standalone_ids = {v['id'] for v in policy.get('standalone_videos', [])}
         study_playlists = {p['id'] for p in policy['playlists']}
         study_channels = {c['id'] for c in policy.get('channels', [])}
-        is_study = request.get("video_id") in study_ids or request.get("playlist_id") in study_playlists or request.get('channel_id') in study_channels
+        is_study = request.get("video_id") in (study_ids | standalone_ids) or request.get("playlist_id") in study_playlists or request.get('channel_id') in study_channels
         if is_study:
             helper_json("guard-check")
             open_url(url, browser_app)
-            print("Лекции из белого списка доступны постоянно, без таймера.")
+            if request.get('video_id') in standalone_ids:
+                print("Ролик из белого списка доступен постоянно, без таймера.")
+            else:
+                print("Лекции из белого списка доступны постоянно, без таймера.")
             return 0
         root_status = helper_json("youtube-status")
         if int(root_status.get('usage', {}).get('counts', {}).get(request.get('video_id'), 0)) >= 2:

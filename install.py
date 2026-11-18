@@ -96,6 +96,13 @@ def merge_policy(existing, incoming):
         channels = result.setdefault('channels', [])
         if not any(c['id'] == channel['id'] for c in channels):
             channels.append(copy.deepcopy(channel))
+    if incoming.get('standalone_videos'):
+        videos = result.setdefault('standalone_videos', [])
+        known_ids = {video['id'] for video in videos}
+        for video in incoming['standalone_videos']:
+            if video['id'] not in known_ids:
+                videos.append(copy.deepcopy(video))
+                known_ids.add(video['id'])
     return result
 
 

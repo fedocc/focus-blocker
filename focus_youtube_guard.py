@@ -91,6 +91,18 @@ def atomic_json(path, value, mode=0o600):
             tmp.unlink()
 
 
+def validate_approved_videos(videos):
+    if not isinstance(videos, list):
+        raise RuntimeError('Invalid approved video list')
+    for video in videos:
+        video_id = video.get('id') if isinstance(video, dict) else None
+        if not isinstance(video_id, str) or not VIDEO_ID.fullmatch(video_id):
+            raise RuntimeError('Invalid approved video')
+        seconds = video.get('duration_seconds')
+        if seconds is not None and (type(seconds) is not int or not 1 <= seconds <= 86400):
+            raise RuntimeError('Invalid approved video')
+
+
 def read_policy():
     value = json.loads(POLICY.read_text())
     if value.get('schema_version') != 1 or not isinstance(value.get('playlists'), list):
@@ -98,10 +110,8 @@ def read_policy():
     for playlist in value['playlists']:
         if not isinstance(playlist.get('id'), str) or not playlist.get('videos'):
             raise RuntimeError('Invalid approved playlist')
-        for video in playlist['videos']:
-            seconds = video.get('duration_seconds')
-            if not VIDEO_ID.fullmatch(video.get('id', '')) or (seconds is not None and (isinstance(seconds, bool) or not isinstance(seconds, int) or not 1 <= seconds <= 86400)):
-                raise RuntimeError('Invalid approved video')
+        validate_approved_videos(playlist['videos'])
+    validate_approved_videos(value.get('standalone_videos', []))
     channels = value.get('channels', [])
     if not isinstance(channels, list):
         raise RuntimeError('Invalid approved channels')
@@ -125,8 +135,13 @@ def daily_slot_available(usage, key, now):
     return last is None or day_at(now) > day_at(float(last))
 
 
+def standalone_video_ids(policy):
+    return {video['id'] for video in policy.get('standalone_videos', [])}
+
+
 def study_scope(policy, playlist_id=None):
     playlists = policy['playlists']
+    allowed_ids = sorted(standalone_video_ids(policy) | {v['id'] for p in playlists for v in p['videos']})
     channels = policy.get('channels', [])
     uploads = {c['uploads_playlist_id'] for c in channels}
     paths = []
@@ -134,12 +149,12 @@ def study_scope(policy, playlist_id=None):
         for base in ('/channel/' + channel['id'], '/@' + channel['handle'].lower()):
             paths.extend(base + suffix for suffix in ('', '/featured', '/videos', '/streams', '/shorts', '/playlists'))
     if not playlists:
-        return {'mode': 'playlist', 'allowed_ids': [], 'playlist_ids': [], 'seconds': None, 'persistent_study': True}
+        return {'mode': 'playlist', 'allowed_ids': allowed_ids, 'playlist_ids': [], 'seconds': None, 'persistent_study': True}
     return {'mode': 'playlist', 'playlist_id': playlist_id or playlists[0]['id'],
             'playlist_ids': [p['id'] for p in playlists],
             'channel_ids': [c['id'] for c in channels], 'channel_paths': paths,
             'channel_video_ids': sorted({v['id'] for p in playlists if p['id'] in uploads for v in p['videos']}),
-            'allowed_ids': sorted({v['id'] for p in playlists for v in p['videos']}),
+            'allowed_ids': allowed_ids,
             'seconds': None, 'persistent_study': True}
 
 
@@ -223,6 +238,8 @@ def make_scope(request, policy, usage, now, *, verified_seconds=None):
         raise ValueError('This playlist is not approved')
     if not video_id:
         raise ValueError('YouTube requires a specific video ID')
+    if video_id in standalone_video_ids(policy):
+        return study_scope(policy)
     if not daily_slot_available(usage, 'last_regular_opened_at', now):
         raise RuntimeError('YouTube уже открывался сегодня; новое обычное видео доступно после полуночи по Москве.')
     if int(usage.get('counts', {}).get(video_id, 0)) >= 2:
