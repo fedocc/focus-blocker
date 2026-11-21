@@ -155,13 +155,13 @@ class NativeHandshakeFixTests(unittest.TestCase):
 
 
 class LuLuSeriesPatternTests(unittest.TestCase):
-    def test_covers_series_and_preserves_previous_blocks_without_matching_lookalikes(self):
+    def test_series_is_unrestricted_while_social_blocks_remain(self):
         import re
         policy=json.loads(Path(__file__).with_name('chatgpt_lulu_policy.json').read_text())
         pattern=policy['domain_regex']
-        for domain in ('mirabreakingbad.com','www.plplayer.online','kalarona.org','youtube.com','instagram.com','tiktok.com'):
+        for domain in ('youtube.com','instagram.com','tiktok.com','x.com','web.telegram.org'):
             self.assertIsNotNone(re.search(pattern,'https://'+domain+'/'))
-        for domain in ('example.com','openai.com','mirabreakingbad.com.evil.test'):
+        for domain in ('mirabreakingbad.com','www.plplayer.online','kalarona.org','example.com','openai.com','mirabreakingbad.com.evil.test'):
             self.assertIsNone(re.search(pattern,'https://'+domain+'/'))
         self.assertEqual(len(policy['application_code_ids']),3)
 
