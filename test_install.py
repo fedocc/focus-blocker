@@ -44,7 +44,7 @@ class PolicyAndMigrationTests(unittest.TestCase):
         old = {'schema_version': 1, 'playlists': [copy.deepcopy(POLICY['playlists'][0])]}
         merged = install.merge_policy(old, POLICY)
         self.assertEqual(merged['playlists'][0], old['playlists'][0])
-        self.assertEqual(len(merged['playlists']), 3)
+        self.assertEqual(merged['playlists'], POLICY['playlists'])
         self.assertEqual(merged['channels'], POLICY['channels'])
 
     def test_invalid_existing_policy_is_not_replaced_with_defaults(self):
